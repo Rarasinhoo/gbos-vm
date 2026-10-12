@@ -64,4 +64,12 @@ if [ -n "$dev" ]; then
       printf "VM_PERF mouse frames_at_120hz none=%d one=%d several=%d\n", z, one, many
     }'
 fi
+# Touchpad: the host creates the virtual touchpad, glides one finger, then scrolls Settings with two.
+am start --user "$u" -a android.settings.SETTINGS >/dev/null 2>&1; sleep 4
+dumpsys gfxinfo $pkg reset >/dev/null 2>&1
+echo "VM_PERF touch_ready"
+sleep 12
+dumpsys input 2>/dev/null | awk '/VM Touchpad/ {f = 1} f && /Sources|Classes|Touchpad|Gesture/ {print; if (++c >= 4) exit}' | cut -c1-140 | sed 's/^ */VM_PERF touch device /'
+dumpsys gfxinfo $pkg 2>/dev/null | grep -E '^(Total frames rendered|Janky frames)' | sed 's/^/VM_PERF touch /'
+echo "VM_PERF touch settings tap=$(settings --user "$u" get system touchpad_tap_to_click) natural=$(settings --user "$u" get system touchpad_natural_scrolling)"
 echo VM_PERF_END

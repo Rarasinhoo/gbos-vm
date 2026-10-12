@@ -44,11 +44,11 @@ def main():
     while not (run / 'spice.sock').exists():
         if vm.poll() is not None or time.monotonic() > deadline: sys.exit('VM did not start')
         time.sleep(.2)
-    env = dict(os.environ, VM_MOUSE_SEAMLESS='0', VM_MOUSE_RELATIVE='0', VM_SELFTEST_GLIDE='1', VM_INPUT_TOKEN=(run / 'token').read_text())
+    env = dict(os.environ, VM_MOUSE_SEAMLESS='0', VM_MOUSE_RELATIVE='0', VM_SELFTEST_GLIDE='1', VM_SELFTEST_TOUCH='1', VM_INPUT_TOKEN=(run / 'token').read_text())
     viewer = subprocess.Popen([str(work / 'host/Googlebook VM.app/Contents/MacOS/GooglebookViewer'), str(run / 'spice.sock')],
                               env=env, stdout=(run / 'viewer.log').open('w'), stderr=subprocess.STDOUT, start_new_session=True)
     # Timestamp both logs on arrival, so viewer samples can be matched to the guest's scroll rounds.
-    events = []; offsets = {'serial': 0, 'viewer': 0}; start = time.monotonic(); glided = False
+    events = []; offsets = {'serial': 0, 'viewer': 0}; start = time.monotonic(); glided = touched = False
     try:
         while vm.poll() is None and time.monotonic() - start < 600:
             time.sleep(.5); now = time.monotonic() - start
@@ -58,6 +58,9 @@ def main():
             # The guest is timing its mouse: glide it (the viewer's SIGUSR2 hook)
             if not glided and any('VM_PERF mouse_ready' in l for _, _, l in events):
                 glided = True; time.sleep(1); os.kill(viewer.pid, signal.SIGUSR2)
+            # ...and then its touchpad (the hook's second run)
+            if glided and not touched and any('VM_PERF touch_ready' in l for _, _, l in events):
+                touched = True; time.sleep(1); os.kill(viewer.pid, signal.SIGUSR2)
             if any('VM_PERF_END' in l for _, _, l in events): break
     finally:
         if vm.poll() is None: os.killpg(vm.pid, signal.SIGTERM)
@@ -68,6 +71,7 @@ def main():
     report = {'run': name, 'display': display, 'refresh': refresh[1:], 'finished': any('VM_PERF_END' in l for _, _, l in events),
               'guest_display': [l.split('VM_PERF ', 1)[1] for _, s, l in events if s == 'serial' and re.search(r'VM_PERF (display|sf) ', l)],
               'mouse': [l.split('VM_PERF mouse ', 1)[1] for _, s, l in events if s == 'serial' and 'VM_PERF mouse ' in l],
+              'touch': [l.split('VM_PERF ', 1)[1] for _, s, l in events if s == 'serial' and re.search(r'VM_PERF touch', l)],
               'rounds': []}
     (run / 'perf-events.json').write_text(json.dumps(events))
     windows = {}
