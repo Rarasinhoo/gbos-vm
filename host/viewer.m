@@ -28,6 +28,7 @@ static unsigned short scan[128] = {
 @property(nonatomic) CGSize guestSize;
 @property(nonatomic) CGFloat gain;      // guest pixels moved per relative mouse count
 @property(nonatomic) CGPoint believed;  // where we believe the guest cursor is, in guest pixels
+@property(nonatomic) CGPoint carry;     // captured mouse: motion not sent yet, under one guest pixel
 @property(nonatomic,strong) NSTrackingArea *tracking;
 @property(nonatomic) BOOL everSynced;
 @property(nonatomic) BOOL haveTarget;
@@ -122,7 +123,11 @@ static unsigned short scan[128] = {
   if(!NSPointInRect([self convertPoint:e.locationInWindow fromView:nil],self.bounds)){if(self.inside){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}return;}
   self.inside=YES;if(self.guestCursor)[self setHostCursorHidden:YES];CGPoint g=[self guestPoint:e];self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);return;}
  if(self.seamless){if(self.inside)[self steer:e];return;}
- if(!self.captured)return;CGFloat scale=MIN(self.bounds.size.width/self.guestSize.width,self.bounds.size.height/self.guestSize.height);if(scale<=0)scale=1;[self.input sendMouseMotion:self.buttons relativePoint:CGPointMake(e.deltaX/scale,e.deltaY/scale)];
+ if(!self.captured)return;CGFloat scale=MIN(self.bounds.size.width/self.guestSize.width,self.bounds.size.height/self.guestSize.height);if(scale<=0)scale=1;
+ // SPICE moves the mouse in whole pixels and drops the fraction; macOS deltas are fractional, so carry
+ // what is left to the next event instead of losing it (slow moves would stall, fast ones fall short).
+ CGPoint d=CGPointMake(e.deltaX/scale+self.carry.x,e.deltaY/scale+self.carry.y),w=CGPointMake(trunc(d.x),trunc(d.y));self.carry=CGPointMake(d.x-w.x,d.y-w.y);
+ if(w.x||w.y)[self.input sendMouseMotion:self.buttons relativePoint:w];
 }
 - (void)mouseDragged:(NSEvent *)e {[self mouseMoved:e];}
 - (void)rightMouseDragged:(NSEvent *)e {[self mouseMoved:e];}
@@ -281,6 +286,12 @@ static double screenRefresh(NSScreen *screen) {
    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
     NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
     c.arguments=@[[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,[NSString stringWithFormat:@"VM_DENSITY %ld",(long)self.guestDensity]];
+    [c launchAndReturnError:nil];});
+   // macOS already accelerates the mouse; Android accelerating it again makes the captured pointer
+   // undershoot slow moves and overshoot fast ones. Sent after the density verb has been handled.
+   dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(20*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+    NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
+    c.arguments=@[[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,@"VM_POINTER_ACCEL_OFF"];
     [c launchAndReturnError:nil];});
   }
  }];

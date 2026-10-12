@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Start the Googlebook desktop with its viewer window.  launch.py WORK [--fullscreen] [--display WxH]
 Closing the viewer shuts Android down cleanly. Data in WORK/image/googlebook.raw persists."""
-import datetime, json, os, signal, subprocess, sys, time
+import datetime, json, os, signal, subprocess, sys, threading, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -78,7 +78,11 @@ def main():
                 # Once Android is up, match the display density to the resolution (persists).
                 if not configured and time.monotonic() - start > 20 and serial.exists() and b'VM_BOOT_COMPLETED' in serial.read_bytes():
                     configured = True
-                    try: time.sleep(8); vm_control.send(run_dir, f'VM_DENSITY {density}')
+                    try:
+                        time.sleep(8); vm_control.send(run_dir, f'VM_DENSITY {density}')
+                        # macOS already accelerates the mouse; stop Android doing it a second time.
+                        # Later, once the density verb is handled, without holding up this loop.
+                        threading.Timer(12, lambda: vm_control.send(run_dir, 'VM_POINTER_ACCEL_OFF')).start()
                     except OSError: pass
     except KeyboardInterrupt:
         print('\nStopping.', flush=True)
