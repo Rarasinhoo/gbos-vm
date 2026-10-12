@@ -159,6 +159,20 @@ if '--stress-test' in sys.argv:
 on post-fs-data
     start vm-stress-test
 ''','vendor_configs_file')
+if '--perf-test' in sys.argv:
+ # Test images only: scroll Settings and print frame statistics after boot (see guest_perf_test.sh).
+ add('bin/vm-perf-test.sh',(R/'scripts/guest_perf_test.sh').read_bytes(),'vendor_shell_exec',0o755)
+ add('etc/init/vm-perf-test.rc',b'''service vm-perf-test /system/bin/sh /vendor/bin/vm-perf-test.sh
+    disabled
+    oneshot
+    user shell
+    group shell graphics log readproc input
+    seclabel u:r:shell:s0
+    console ttyAMA0
+
+on post-fs-data
+    start vm-perf-test
+''','vendor_configs_file')
 if '--chrome-diagnostic' in sys.argv:
  assert '--venus' in sys.argv
  add('bin/vm-chrome-diagnostic.sh',(R/'scripts/guest_chrome_diagnostic.sh').read_bytes(),'vendor_shell_exec',0o755)
