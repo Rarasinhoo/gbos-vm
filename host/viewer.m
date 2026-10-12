@@ -19,6 +19,7 @@ static unsigned short scan[128] = {
 };
 @interface VMView : MTKView
 - (void)setHostCursorHidden:(BOOL)hidden;
+- (void)moveBy:(CGPoint)points;
 @property(nonatomic,strong) CSInput *input;
 @property(nonatomic) BOOL captured;
 @property(nonatomic) BOOL seamless;
@@ -123,10 +124,14 @@ static unsigned short scan[128] = {
   if(!NSPointInRect([self convertPoint:e.locationInWindow fromView:nil],self.bounds)){if(self.inside){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}return;}
   self.inside=YES;if(self.guestCursor)[self setHostCursorHidden:YES];CGPoint g=[self guestPoint:e];self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);return;}
  if(self.seamless){if(self.inside)[self steer:e];return;}
- if(!self.captured)return;CGFloat scale=MIN(self.bounds.size.width/self.guestSize.width,self.bounds.size.height/self.guestSize.height);if(scale<=0)scale=1;
+ if(!self.captured)return;[self moveBy:CGPointMake(e.deltaX,e.deltaY)];
+}
+// Captured mouse: move the guest's relative mouse by a distance in this view's points.
+- (void)moveBy:(CGPoint)points {
+ CGFloat scale=MIN(self.bounds.size.width/self.guestSize.width,self.bounds.size.height/self.guestSize.height);if(scale<=0)scale=1;
  // SPICE moves the mouse in whole pixels and drops the fraction; macOS deltas are fractional, so carry
  // what is left to the next event instead of losing it (slow moves would stall, fast ones fall short).
- CGPoint d=CGPointMake(e.deltaX/scale+self.carry.x,e.deltaY/scale+self.carry.y),w=CGPointMake(trunc(d.x),trunc(d.y));self.carry=CGPointMake(d.x-w.x,d.y-w.y);
+ CGPoint d=CGPointMake(points.x/scale+self.carry.x,points.y/scale+self.carry.y),w=CGPointMake(trunc(d.x),trunc(d.y));self.carry=CGPointMake(d.x-w.x,d.y-w.y);
  if(w.x||w.y)[self.input sendMouseMotion:self.buttons relativePoint:w];
 }
 - (void)mouseDragged:(NSEvent *)e {[self mouseMoved:e];}
@@ -153,6 +158,7 @@ static unsigned short scan[128] = {
 @property(nonatomic) BOOL startFullscreen;
 @property(nonatomic,strong) NSWindow *settingsWindow;
 @property(nonatomic,strong) NSTask *vmTask;
+@property(nonatomic,strong) dispatch_source_t glide;
 @property(nonatomic,strong) NSString *runDir;
 @property(nonatomic) BOOL quitting;
 @property(nonatomic) BOOL restarting;
@@ -203,7 +209,14 @@ static double screenRefresh(NSScreen *screen) {
  dispatch_resume(usr);self.selftest=usr;
  // Self-test hook: SIGUSR2 sends a burst of scroll events at the current pointer position.
  signal(SIGUSR2,SIG_IGN);dispatch_source_t usr2=dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL,SIGUSR2,0,dispatch_get_main_queue());
- dispatch_source_set_event_handler(usr2,^{for(int i=0;i<8;i++)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(i*0.05*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self ctlSend:@"S 0.000 -0.500"];});fprintf(stderr,"SELFTEST scroll\n");});
+ dispatch_source_set_event_handler(usr2,^{
+  // With VM_SELFTEST_GLIDE=1 (tests/perf.py): instead, a slow, perfectly even glide through the
+  // captured-mouse path, 0.2 x 0.1 points every 2 ms for 5 s, so the guest can time what arrives.
+  if(getenv("VM_SELFTEST_GLIDE")){__block int n=0;dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+   dispatch_source_set_timer(t,DISPATCH_TIME_NOW,2*NSEC_PER_MSEC,0);
+   dispatch_source_set_event_handler(t,^{[self.view moveBy:CGPointMake(n%2000<1000?.2:-.2,n%2000<1000?.1:-.1)];if(++n>=2500)dispatch_source_cancel(t);});
+   dispatch_resume(t);self.glide=t;fprintf(stderr,"SELFTEST glide\n");return;}
+  for(int i=0;i<8;i++)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(i*0.05*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self ctlSend:@"S 0.000 -0.500"];});fprintf(stderr,"SELFTEST scroll\n");});
  dispatch_resume(usr2);self.selftest2=usr2;
  fprintf(stderr,"WINDOW %ld\n",(long)self.window.windowNumber);
  fprintf(stderr,"NATIVE_VIEWER device=%s target_hz=60 socket=%s\n",self.view.device.name.UTF8String,self.socketPath.UTF8String);

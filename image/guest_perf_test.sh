@@ -34,4 +34,34 @@ while [ $round -le 3 ]; do
   round=$((round+1))
 done
 am start --user "$u" -a android.intent.action.MAIN -c android.intent.category.HOME >/dev/null 2>&1
+sleep 3
+# Mouse: the host glides the captured mouse evenly for 5 s once it sees mouse_ready (tests/perf.py).
+# Time every report the guest's USB mouse delivers, and how far each one moves.
+dev=
+for d in /dev/input/event*; do getevent -p "$d" 2>/dev/null | grep -q 'QEMU USB Mouse' && dev=$d; done
+if [ -n "$dev" ]; then
+  echo "VM_PERF mouse_ready dev=$dev"
+  timeout 9 getevent -t "$dev" > /data/local/tmp/vm-perf-mouse.txt 2>/dev/null
+  # Lines are "[ seconds] type code value" in hex. One report = REL_X/REL_Y up to a SYN_REPORT.
+  tr -d '[]' < /data/local/tmp/vm-perf-mouse.txt | awk '
+    function hex(s,  i, v) { v = 0; for (i = 1; i <= length(s); i++) v = v * 16 + index("0123456789abcdef", substr(tolower(s), i, 1)) - 1
+                             return v >= 2147483648 ? v - 4294967296 : v }
+    $2 == "0002" && ($3 == "0000" || $3 == "0001") { m += ($3 == "0000" ? 1 : 0) * hex($4); my += ($3 == "0001" ? 1 : 0) * hex($4); moved = 1 }
+    $2 == "0000" && $3 == "0000" && moved {
+      t[n] = $1; dx[n] = m < 0 ? -m : m; n++; m = 0; my = 0; moved = 0 }
+    END {
+      # Keep only the glide: drop anything before the last pause of over a second (stale reports)
+      for (i = 1; i < n; i++) if (t[i] - t[i-1] > 1) s0 = i
+      for (i = s0; i < n; i++) { t[i - s0] = t[i]; dx[i - s0] = dx[i] } n -= s0
+      if (n < 10) { print "VM_PERF mouse reports=" n; exit }
+      for (i = 1; i < n; i++) { g = (t[i] - t[i-1]) * 1000; gap[i] = g; if (g > 12) late++; if (g > maxg) maxg = g; sum += g }
+      for (i = 0; i < n; i++) { h[dx[i] > 4 ? 5 : dx[i]]++ }
+      # Display frames at 120 Hz: how many got no report, one, or several
+      t0 = t[0]; for (i = 0; i < n; i++) { f = int((t[i] - t0) * 120); c[f]++; if (f > last) last = f }
+      for (f = 0; f <= last; f++) { k = c[f] + 0; if (k == 0) z++; else if (k == 1) one++; else many++ }
+      printf "VM_PERF mouse reports=%d seconds=%.2f mean_gap_ms=%.1f max_gap_ms=%.1f gaps_over_12ms=%d\n", n, t[n-1] - t0, sum / (n - 1), maxg, late
+      printf "VM_PERF mouse dx_px 0=%d 1=%d 2=%d 3=%d 4=%d 5+=%d\n", h[0], h[1], h[2], h[3], h[4], h[5]
+      printf "VM_PERF mouse frames_at_120hz none=%d one=%d several=%d\n", z, one, many
+    }'
+fi
 echo VM_PERF_END
