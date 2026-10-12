@@ -120,7 +120,7 @@ index bbee095..cd4f56c 100644
      g_main_context_ref(self->_main_context);
      g_main_context_push_thread_default(self->_main_context);
 diff --git a/Sources/CocoaSpice/CSSession.m b/Sources/CocoaSpice/CSSession.m
-index 92707b1..053d5c5 100644
+index 92707b1..dbe8604 100644
 --- a/Sources/CocoaSpice/CSSession.m
 +++ b/Sources/CocoaSpice/CSSession.m
 @@ -297,7 +297,7 @@ - (id)init {
@@ -144,7 +144,7 @@ index 92707b1..053d5c5 100644
          SPICE_DEBUG("[CocoaSpice] %s:%d", __FUNCTION__, __LINE__);
          g_signal_connect(session, "channel-new",
 diff --git a/Sources/CocoaSpiceRenderer/CSMetalRenderer.m b/Sources/CocoaSpiceRenderer/CSMetalRenderer.m
-index 9c7bad9..713a095 100644
+index 9c7bad9..39c6e62 100644
 --- a/Sources/CocoaSpiceRenderer/CSMetalRenderer.m
 +++ b/Sources/CocoaSpiceRenderer/CSMetalRenderer.m
 @@ -134,9 +134,9 @@ - (nonnull instancetype)initWithMetalKitView:(nonnull MTKView *)mtkView
@@ -160,3 +160,109 @@ index 9c7bad9..713a095 100644
          NSAssert(defaultLibrary, @"Failed to get library from bundle: %@", error);
  
          // Load the vertex function from the library
+@@ -274,18 +274,21 @@ static matrix_float4x4 matrix_scale_translate(CGFloat scale, CGPoint translate)
+ /// Called whenever the view needs to render a frame
+ - (void)drawInMTKView:(nonnull MTKView *)view
+ {
+-    // Obtain a renderPassDescriptor generated from the view's drawable textures
+-    MTLRenderPassDescriptor *renderPassDescriptor = view.currentRenderPassDescriptor;
+-    id<CAMetalDrawable> currentDrawable = view.currentDrawable;
++    const _CSRendererSourceData *sourceData = self.renderSourceData;
+ 
+-    if (renderPassDescriptor == nil || currentDrawable == nil) {
++    // Decide before touching the drawable: asking the view for one takes it
++    // from a pool of three and can block the main thread until one frees up,
++    // so idle ticks must not take one only to throw it away.
++    if (!self.renderNeedsUpdate || !sourceData.isVisible) {
++        [self _completeDraw];
+         return;
+     }
+ 
+-    const _CSRendererSourceData *sourceData = self.renderSourceData;
++    // Obtain a renderPassDescriptor generated from the view's drawable textures
++    MTLRenderPassDescriptor *renderPassDescriptor = view.currentRenderPassDescriptor;
++    id<CAMetalDrawable> currentDrawable = view.currentDrawable;
+ 
+-    if (!self.renderNeedsUpdate || !sourceData.isVisible) {
+-        [self _completeDraw];
++    if (renderPassDescriptor == nil || currentDrawable == nil) {
+         return;
+     }
+ 
+@@ -306,7 +309,60 @@ - (void)drawInMTKView:(nonnull MTKView *)view
+                  sampler:self.renderSampler
+     renderPassDescriptor:renderPassDescriptor];
+ 
+-    [commandBuffer presentDrawable:currentDrawable];
++    // Frame pacing as the viewer sees it: when each frame actually reached the
++    // screen. A steady guest frame rate that does not divide the display's
++    // refresh shows up as frames that stay up for uneven times (judder).
++    [currentDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
++        CFTimeInterval presented = drawable.presentedTime;
++        if (presented <= 0) {
++            return;
++        }
++        dispatch_async(dispatch_get_main_queue(), ^{
++            static CFTimeInterval last, windowStart;
++            static double intervals[1024]; static unsigned count;
++            if (last && presented - last < 0.1 && count < 1024) {
++                intervals[count++] = presented - last;
++            }
++            last = presented;
++            if (!windowStart) windowStart = presented;
++            if (presented - windowStart < 5) {
++                return;
++            }
++            if (count >= 30) {
++                double sorted[1024]; memcpy(sorted, intervals, count * sizeof(double));
++                qsort_b(sorted, count, sizeof(double), ^int(const void *a, const void *b) {
++                    double d = *(const double *)a - *(const double *)b; return (d > 0) - (d < 0);
++                });
++                // Judder is a frame held for a fraction of a guest frame more or
++                // less than a whole number of them (1.5, say). A whole number
++                // (2: the guest skipped one) is the guest's doing, not ours.
++                double median = sorted[count / 2], period = self.guestRefresh > 0 ? 1 / self.guestRefresh : median;
++                unsigned uneven = 0;
++                for (unsigned i = 0; i < count; i++) {
++                    double frames = intervals[i] / period;
++                    if (fabs(frames - round(frames)) >= 0.2) uneven++;
++                }
++                fprintf(stderr, "NATIVE_PRESENT %u frames median %.1f ms uneven %.1f%% screen %ld Hz\n", count, median * 1000,
++                        100.0 * uneven / count, (long)view.window.screen.maximumFramesPerSecond);
++            }
++            windowStart = presented; count = 0;
++        });
++    }];
++    // Hold each frame for the same number of refreshes. Guest frames arrive
++    // with some jitter and are not locked to this display's vsync, so a frame
++    // that lands just before or after a refresh would otherwise stay up for
++    // one or three refreshes instead of two. Asking for "at least n refreshes
++    // after the previous one, less half a refresh" keeps that slack without
++    // ever delaying a frame by a whole extra refresh.
++    NSInteger screenHz = view.window.screen.maximumFramesPerSecond;
++    long holds = (self.guestRefresh > 0 && screenHz > 0) ? lround(screenHz / self.guestRefresh) : 0;
++    static int pacing = -1;
++    if (pacing < 0) pacing = !(getenv("VM_NO_PACING") && !strcmp(getenv("VM_NO_PACING"), "1"));
++    if (pacing && holds >= 2 && fabs(screenHz - holds * self.guestRefresh) < 1) {
++        [commandBuffer presentDrawable:currentDrawable afterMinimumDuration:(holds - 0.5) / screenHz];
++    } else {
++        [commandBuffer presentDrawable:currentDrawable];
++    }
+ 
+     [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer) {
+         dispatch_async(dispatch_get_main_queue(), ^{
+diff --git a/Sources/CocoaSpiceRenderer/include/CSMetalRenderer.h b/Sources/CocoaSpiceRenderer/include/CSMetalRenderer.h
+index 3c71dbf..7857c09 100644
+--- a/Sources/CocoaSpiceRenderer/include/CSMetalRenderer.h
++++ b/Sources/CocoaSpiceRenderer/include/CSMetalRenderer.h
+@@ -34,6 +34,10 @@ NS_ASSUME_NONNULL_BEGIN
+ /// @param downscaler Downscaler to use
+ - (void)changeUpscaler:(MTLSamplerMinMagFilter)upscaler downscaler:(MTLSamplerMinMagFilter)downscaler;
+ 
++/// The guest's refresh rate in Hz, or 0 when unknown. When the screen refreshes a whole
++/// multiple of it faster, every frame is held for that many refreshes, so motion is even.
++@property (nonatomic) double guestRefresh;
++
+ @end
+ 
+ NS_ASSUME_NONNULL_END

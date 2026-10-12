@@ -47,6 +47,10 @@ def main():
     if setting('Networking', '1') == '0': options.append('--offline')
     if setting('Audio', '1') == '0': options.append('--no-audio')
     if setting('Bluetooth', '1') == '0': options.append('--no-bluetooth')
+    try:  # pace the guest to the main screen (see guest_refresh in run_vm.py)
+        options += ['--host-refresh', subprocess.check_output([str(viewer_app), '--screen-refresh'], text=True, timeout=10).strip()]
+    except (subprocess.SubprocessError, OSError):
+        pass
     density = round(240 * width / 1920)
     name = 'desktop-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     run_dir = work / 'logs' / name

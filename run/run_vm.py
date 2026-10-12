@@ -60,6 +60,16 @@ def start_netsimd(binary, out):
     return proc, port
 
 
+def guest_refresh(host_hz):
+    """The guest refresh rate (60 or 75) whose frames land most evenly on a host_hz screen.
+    QEMU's display description (EDID) says 75 Hz and cannot be changed; without one, the guest
+    driver makes its own mode at 59.95 Hz. Those are the only two rates on offer. A screen that is
+    a whole multiple of one shows every frame for the same time; otherwise the rate with fewer
+    uneven frames per second (the beat against the nearest multiple) wins."""
+    beat = lambda r: min(abs(host_hz - k * r) for k in range(1, 5))
+    return min((60, 75), key=lambda r: beat(59.95 if r == 60 else 75))
+
+
 def main():
     a = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     a.add_argument('work'); a.add_argument('name')
@@ -68,6 +78,8 @@ def main():
     a.add_argument('--no-audio', action='store_true'); a.add_argument('--no-bluetooth', action='store_true')
     a.add_argument('--display', default='1920x1200'); a.add_argument('--memory', type=int, default=4096)
     a.add_argument('--cpus', type=int, default=6)
+    a.add_argument('--host-refresh', type=float, help="the Mac screen's refresh rate; picks the guest rate that paces best on it")
+    a.add_argument('--refresh', type=int, choices=(60, 75), help='guest refresh rate (overrides --host-refresh; default 75)')
     a.add_argument('--image', help='image folder (default WORK/image)')
     args = a.parse_args()
     work = Path(args.work).resolve()
@@ -78,6 +90,8 @@ def main():
               image / 'googlebook.raw', image / 'initrd.img', image / 'kernel.Image', utm / 'Contents/Frameworks'):
         if not p.exists(): sys.exit(f'missing: {p}')
     width, height = args.display.split('x')
+    refresh = args.refresh or (guest_refresh(args.host_refresh) if args.host_refresh else 75)
+    print('guest refresh:', refresh, 'Hz' + (f' (Mac screen {args.host_refresh:g} Hz)' if args.host_refresh else ''), flush=True)
     (work / 'logs').mkdir(exist_ok=True)
     lock = (work / 'logs/vm.lock').open('a')
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -86,6 +100,7 @@ def main():
     # Random per-boot secret for the pointer/clipboard link (see guest/input).
     token = secrets.token_hex(16)
     (out / 'token').write_text(token); os.chmod(out / 'token', 0o600)
+    (out / 'refresh').write_text(f'{59.95 if refresh == 60 else 75}\n')  # the viewer paces frames to it
 
     netsim, cmdline = None, CMDLINE + ' androidboot.gbos_token=' + token
     netsimd = None if args.no_bluetooth else find_netsimd()
@@ -97,6 +112,7 @@ def main():
     cmd = [str(host / 'qemu-interop'), '-L', str(utm / 'Contents/Resources/qemu'), '-nodefaults', '-vga', 'none',
            '-nic', 'none', '-device', 'virtio-gpu-gl-pci,hostmem=8G,blob=true,venus=true',
            '-global', f'virtio-gpu-gl-pci.xres={width}', '-global', f'virtio-gpu-gl-pci.yres={height}',
+           *(['-global', 'virtio-gpu-gl-pci.edid=off'] if refresh == 60 else []),
            '-cpu', 'host', '-smp', f'cpus={args.cpus},sockets=1,cores={args.cpus},threads=1',
            '-machine', 'virt,gic-version=3,highmem=on,highmem-ecam=off', '-accel', 'hvf,ipa-granule-size=0x1000',
            '-m', str(args.memory), '-audio', 'none',

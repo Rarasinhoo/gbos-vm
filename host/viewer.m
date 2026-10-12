@@ -202,6 +202,8 @@ static unsigned short scan[128] = {
 - (void)resyncPointer:(id)sender{[self.view resync];}
 - (void)toggleFull:(id)sender{[self.window toggleFullScreen:nil];}
 - (void)connectSpice {
+ NSString *hz=[NSString stringWithContentsOfFile:[[self.socketPath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"refresh"] encoding:NSUTF8StringEncoding error:nil];
+ self.renderer.guestRefresh=hz.doubleValue;fprintf(stderr,"GUEST_REFRESH %.2f Hz screen %ld Hz\n",hz.doubleValue,(long)self.window.screen.maximumFramesPerSecond);
  self.connection=[[CSConnection alloc] initWithUnixSocketFile:[NSURL fileURLWithPath:self.socketPath]];self.connection.audioEnabled=NO;self.connection.session.shareClipboard=NO;self.connection.delegate=self;
  [self.connection connect];
 }
@@ -238,6 +240,8 @@ static unsigned short scan[128] = {
  if(![d boolForKey:@"Networking"])[args addObject:@"--offline"];
  if(![d boolForKey:@"Audio"])[args addObject:@"--no-audio"];
  if(![d boolForKey:@"Bluetooth"])[args addObject:@"--no-bluetooth"];
+ // Pace the guest to the screen the window opens on (see guest_refresh in run_vm.py).
+ [args addObjectsFromArray:@[@"--host-refresh",[NSString stringWithFormat:@"%ld",(long)(self.window.screen?:NSScreen.mainScreen).maximumFramesPerSecond]]];
  NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];t.arguments=args;
  t.standardOutput=[NSFileHandle fileHandleWithNullDevice];t.standardError=[NSFileHandle fileHandleWithNullDevice];
  __weak App *weak=self;
@@ -428,6 +432,8 @@ static unsigned short scan[128] = {
 - (void)spiceForwardedPortClosed:(CSConnection *)c port:(CSPort *)p{}
 @end
 int main(int argc,char **argv){@autoreleasepool {
+ // For launch.py, which starts the VM before this window exists: the main screen's refresh rate.
+ if(argc==2&&!strcmp(argv[1],"--screen-refresh")){printf("%ld\n",(long)NSScreen.mainScreen.maximumFramesPerSecond);return 0;}
  if(argc>3){fprintf(stderr,"Usage: GooglebookViewer [/absolute/path/to/spice.sock [--fullscreen]]\n");return 2;}
  NSApplication *app=[NSApplication sharedApplication];[app setActivationPolicy:NSApplicationActivationPolicyRegular];
  // Menu bar. Actions have no target, so they reach the app delegate through the responder chain.

@@ -96,7 +96,7 @@ So: treat it like a dev VM. It's great for poking at the OS. I wouldn’t daily 
 ## What doesn't work yet
 
 - **Bluetooth is virtual only.** If you have the Android Emulator installed, the VM gets its simulated radio (`netsimd`): Bluetooth turns on, but there's nothing real to pair with. Actual devices would need a USB dongle bridged in, which we haven't built. Without the emulator, Android is told it has no Bluetooth at all.
-- **60 fps cap** on the guest display. The QEMU build we use doesn't expose a refresh rate setting.
+- **The guest refreshes at 60 or 75 Hz, nothing else.** QEMU always describes its display as 75 Hz and has no setting for it; without that description the guest makes its own 59.95 Hz mode. The VM picks whichever lines up better with the screen the window opens on: 60 for 60/120 Hz screens, 75 for 75/85/144 Hz ones. Move the window to a different screen and it keeps the old rate until the next restart. Guest frames aren't locked to the Mac's refresh either, so a little judder remains: about one frame in five holds a refresh too long while scrolling on a 120 Hz screen (it was nine in ten at 75 Hz). `tests/perf.py` measures it.
 - **Flat shading can be wrong.** Chrome needs a Vulkan extension MoltenVK doesn't have, so we tell the guest it exists. That's fine for almost everything; `flat`-interpolated WebGL content may pick the wrong vertex.
 - **Copying *out* of the guest, right-click, and long sessions** are implemented but haven't had a proper test. They might be fine. They might not.
 - **Audio was silent on one boot** and then worked. We don't know why yet.
@@ -126,6 +126,7 @@ run/                VM runner and a command-line launcher (the app bundles these
 image/              the scripts that rebuild the vendor partition
 guest/  host/       sources for the bits we wrote
 patches/            our changes to virglrenderer, Mesa and CocoaSpice
+tests/              soak and display smoothness runs on throwaway test images
 ```
 
 Everything lands in `work/` (set `GOOGLEBOOK_WORK` to put it elsewhere). If you already have the big downloads, point `GOOGLEBOOK_DOWNLOADS` at them and they won't be fetched again. Builds use four jobs by default — raise `GBOS_JOBS` if you have the RAM, but an uncapped Mesa build will happily push a 16 GB Mac into swap (ask me how I know).
