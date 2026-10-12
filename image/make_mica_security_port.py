@@ -184,6 +184,9 @@ if '--perf-test' in sys.argv:
     console ttyAMA0
 
 on post-fs-data
+    # Read once when input starts: log every event the dispatcher gets, to see what the touchpad
+    # turned into (pointer moves, a scroll, a click)
+    setprop log.tag.InputDispatcherInboundEvent DEBUG
     start vm-perf-test
 ''','vendor_configs_file')
 if '--chrome-diagnostic' in sys.argv:

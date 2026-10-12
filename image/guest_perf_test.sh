@@ -9,6 +9,8 @@ while [ "$(getprop sys.boot_completed)" != 1 ] && [ $n -lt 60 ]; do sleep 3; n=$
 sleep 30
 u=$(am get-current-user)
 echo "VM_PERF_BEGIN user=$u size=$(wm size | tr '\n' ' ')"
+# zram/swap: set up by mmd_setup, then the vendor's swapon_all (never both at once)
+echo "VM_PERF zram mmd_setup=$(getprop init.svc.mmd_setup) mmd=$(getprop init.svc.mmd) $(grep -E '^SwapTotal' /proc/meminfo | tr -s ' ')"
 cat /sys/class/drm/card0-Virtual-1/modes 2>&1 | head -8 | sed 's/^/VM_PERF kernel_mode /'
 dumpsys display 2>/dev/null | grep -o -E 'supportedModes \[[^]]*\]' | head -1 | cut -c1-600 | sed 's/^/VM_PERF /'
 dumpsys display 2>/dev/null | grep -o -E 'renderFrameRate [0-9.]+|refreshRate=[0-9.]+|mActiveSfDisplayMode=[^,]*' | sort -u | head -6 | sed 's/^/VM_PERF display /'
@@ -67,9 +69,29 @@ fi
 # Touchpad: the host creates the virtual touchpad, glides one finger, then scrolls Settings with two.
 am start --user "$u" -a android.settings.SETTINGS >/dev/null 2>&1; sleep 4
 dumpsys gfxinfo $pkg reset >/dev/null 2>&1
+logcat -c 2>/dev/null
 echo "VM_PERF touch_ready"
-sleep 12
+# Raw events from the newest touchpad (the host creates it about 2 s after touch_ready and starts
+# moving 5 s after), what Android dispatched, and where its pointer is.
+sleep 3.5
+tp=; for d in $(ls /dev/input/event* | sort -t t -k 2 -n); do getevent -p "$d" 2>/dev/null | grep -q 'VM Touchpad' && tp=$d; done
+# Until the last two-finger stroke is over (the host's gestures take about 9 s from here)
+[ -n "$tp" ] && timeout 14 getevent -lt "$tp" > /data/local/tmp/vm-perf-touch.txt 2>/dev/null
+echo "VM_PERF touch dev=$tp events=$(grep -c SYN_REPORT /data/local/tmp/vm-perf-touch.txt 2>/dev/null) fingers2=$(grep -c 'BTN_TOOL_DOUBLETAP *DOWN' /data/local/tmp/vm-perf-touch.txt 2>/dev/null)"
+grep -m8 -E 'ABS_MT|BTN_TOOL|BTN_TOUCH' /data/local/tmp/vm-perf-touch.txt 2>/dev/null | tr -s ' ' | cut -c1-100 | sed 's/^/VM_PERF touch raw /'
+# Report spacing as the guest got it (bunched reports would read as no motion)
+tr -d '[]' < /data/local/tmp/vm-perf-touch.txt 2>/dev/null | awk '/SYN_REPORT/ {if (l) {g = ($1 - l) * 1000; s += g; n++; if (g > m) m = g; if (g < 1) b++} l = $1}
+  END {if (n) printf "VM_PERF touch timing reports=%d mean_gap_ms=%.1f max_gap_ms=%.1f under_1ms=%d\n", n, s / n, m, b}'
+# What Android made of it: motion events from the touchpad by action, button and classification
+logcat -d 2>/dev/null | grep -i 'notifyMotion' > /data/local/tmp/vm-perf-motion.txt
+echo "VM_PERF touch motions=$(grep -c . /data/local/tmp/vm-perf-motion.txt)"
+grep -o -E 'action=[A-Z_]+|buttonState=0x[0-9a-f]+|classification=[A-Z_]+|source=[A-Z_|]+' /data/local/tmp/vm-perf-motion.txt | sort | uniq -c | sort -rn | head -16 | sed 's/^ */VM_PERF touch motion /'
+grep -m3 -i -E 'BUTTON_PRESS|action=DOWN' /data/local/tmp/vm-perf-motion.txt | cut -c1-260 | sed 's/^/VM_PERF touch press /'
+dumpsys input 2>/dev/null | awk '/MousePointerControllers/ {f = 1} f && /[Pp]osition|Visible|Display ID|[Ii]con/ {print; if (++c >= 8) exit}' | cut -c1-160 | sed 's/^ */VM_PERF touch pointer /'
+dumpsys window 2>/dev/null | grep -m3 -E 'mCurrentFocus|mFocusedApp' | cut -c1-160 | sed 's/^ */VM_PERF touch focus /'
 dumpsys input 2>/dev/null | awk '/VM Touchpad/ {f = 1} f && /Sources|Classes|Touchpad|Gesture/ {print; if (++c >= 4) exit}' | cut -c1-140 | sed 's/^ */VM_PERF touch device /'
 dumpsys gfxinfo $pkg 2>/dev/null | grep -E '^(Total frames rendered|Janky frames)' | sed 's/^/VM_PERF touch /'
 echo "VM_PERF touch settings tap=$(settings --user "$u" get system touchpad_tap_to_click) natural=$(settings --user "$u" get system touchpad_natural_scrolling)"
+# Battery: the viewer passes the Mac's own through (a VM has none, so Android showed it empty).
+dumpsys battery 2>/dev/null | grep -E '^ *(AC powered|present|status|level):' | tr -s ' ' | tr '\n' ' ' | sed 's/^/VM_PERF battery /'; echo
 echo VM_PERF_END

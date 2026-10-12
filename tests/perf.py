@@ -72,6 +72,8 @@ def main():
               'guest_display': [l.split('VM_PERF ', 1)[1] for _, s, l in events if s == 'serial' and re.search(r'VM_PERF (display|sf) ', l)],
               'mouse': [l.split('VM_PERF mouse ', 1)[1] for _, s, l in events if s == 'serial' and 'VM_PERF mouse ' in l],
               'touch': [l.split('VM_PERF ', 1)[1] for _, s, l in events if s == 'serial' and re.search(r'VM_PERF touch', l)],
+              'zram': [l.split('VM_PERF zram ', 1)[1] for _, s, l in events if s == 'serial' and 'VM_PERF zram ' in l],
+              'battery': [l.split('VM_PERF battery ', 1)[1] for _, s, l in events if s == 'serial' and 'VM_PERF battery ' in l],
               'rounds': []}
     (run / 'perf-events.json').write_text(json.dumps(events))
     windows = {}
