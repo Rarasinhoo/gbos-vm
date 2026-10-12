@@ -29,6 +29,19 @@ old=b'on post-fs-data\n    # Late attach SOCCP and start ADSP and CDSP\n    wait
 assert b.count(old)==1
 b=b.replace(old,b'# The Qualcomm coprocessors do not exist in a VM.\non post-fs-data && property:ro.boot.vm.qti_subsystems=1\n    wait_for_prop vendor.all.modules.ready 1\n    restart start-subsys')
 add(n,b,'vendor_configs_file')
+n='etc/init/hw/init.android-desktop.rc';b=original(n)
+old=b'on property:sys.boot_completed=1 && property:mmd.enabled_aconfig=*\n    swapon_all /vendor/etc/fstab.zram'
+assert b.count(old)==1
+b=b.replace(old,b'''# Android's mmd_setup (started by mmd.rc on the same property) sets up zram too, and zram takes its
+# backing device only while unconfigured. Run beside it, swapon_all's mkswap could write while
+# mmd_setup reset zram: a NULL compressor in zram_submit_bio, and a kernel panic (about one boot in
+# twenty here). So set up the swap once mmd_setup is done, or straight away when mmd is off.
+on property:sys.boot_completed=1 && property:mmd.enabled_aconfig=false
+    swapon_all /vendor/etc/fstab.zram
+
+on property:mmd.enabled_aconfig=true && property:init.svc.mmd_setup=stopped
+    swapon_all /vendor/etc/fstab.zram''')
+add(n,b,'vendor_configs_file')
 n='etc/selinux/vendor_file_contexts'
 m=metadata(raw,'/'+n,off)
 add(n,original(n)+b'\n/dev/ttyAMA0 u:object_r:console_device:s0\n',m['xattrs']['security.selinux'].decode().split(':')[2],m['mode']&0o7777)
@@ -319,6 +332,7 @@ for n,(b,label,mode) in files.items():
  assert subprocess.check_output([str(D/'dump.erofs'),'--path=/'+n,'--cat',str(v)])==b,n
 for p in ['/etc/init/hw/init.android-desktop.rc','/etc/selinux/precompiled_sepolicy']:
  if p=='/etc/selinux/precompiled_sepolicy' and '--vm-compat' in sys.argv:continue
+ if p[1:] in files:continue  # changed on purpose, and checked against the change above
  assert subprocess.check_output([str(D/'dump.erofs'),'--path='+p,'--cat',str(v)])==subprocess.check_output([str(D/'dump.erofs'),'--offset='+str(off),'--path='+p,'--cat',str(raw)])
 for n in [p for p in dirs if p not in new_dirs]:
  assert metadata(v,'/'+n if n!='.' else '/')==metadata(raw,'/'+n if n!='.' else '/',off),n
