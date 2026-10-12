@@ -28,6 +28,8 @@ survey() {
       if brew list --formula "$f" >/dev/null 2>&1; then ok "$f"; else miss "$f (Homebrew)" "brew:$f"; fi
     done
   fi
+  find_build_python
+  if [ -n "$BUILD_PYTHON" ]; then ok "Python 3.10+ ($BUILD_PYTHON)"; else miss "Python 3.10 or newer (Apple's python3 is too old for meson)" "brew:python@3.13"; fi
   find_android
   if [ -n "$JAVA_HOME" ]; then ok "JDK ($JAVA_HOME)"; else miss "a JDK" "brew:openjdk"; fi
   if [ -n "$ANDROID_NDK" ]; then ok "Android NDK ($(basename "$ANDROID_NDK"))"; else miss "Android NDK (under $ANDROID_SDK/ndk)" "sdk:ndk;$NDK_TESTED"; fi

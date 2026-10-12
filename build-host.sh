@@ -6,6 +6,7 @@
 no_running_vm
 need git "Xcode command line tools"; need clang "Xcode command line tools"
 need python3 "Homebrew or Xcode"; need pkg-config "brew install pkg-config"
+find_build_python; [ -n "$BUILD_PYTHON" ] || die "meson needs Python 3.10 or newer (Apple's python3 is 3.9): brew install python@3.13"
 FW="$UTM_BETA_APP/Contents/Frameworks"
 [ -d "$FW/qemu-aarch64-softmmu.framework" ] || die "UTM 5 beta not found at $UTM_BETA_APP (set UTM_BETA_APP)"
 if [ ! -d "$MESA_SRC/include/KHR" ]; then
@@ -16,8 +17,11 @@ fi
 mkdir -p "$WORK/src" "$WORK/build" "$WORK/host" "$WORK/pkgconfig"
 
 say "Python build environment (meson, ninja)"
-if [ ! -x "$WORK/env/bin/meson" ]; then
-  python3 -m venv "$WORK/env"
+# Rebuild the environment if an earlier run left it half-installed or on a too-old Python.
+if [ ! -x "$WORK/env/bin/meson" ] || [ ! -x "$WORK/env/bin/ninja" ] \
+   || ! "$WORK/env/bin/python3" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
+  rm -rf "$WORK/env"
+  "$BUILD_PYTHON" -m venv "$WORK/env"
   "$WORK/env/bin/pip" -q install meson==1.12.1 ninja==1.13.2 mako pyyaml packaging
 fi
 export PATH="$WORK/env/bin:$PATH" CCACHE_DISABLE=1

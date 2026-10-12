@@ -102,3 +102,15 @@ find_android() {
   fi
   export ANDROID_SDK ANDROID_NDK D8 ANDROID_JAR JAVA_HOME
 }
+
+# The meson/ninja build environment needs Python 3.10 or newer; Apple's python3 is 3.9.
+# Sets BUILD_PYTHON to the first new-enough interpreter it finds (empty when none).
+find_build_python() {
+  local c bp; bp="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+  BUILD_PYTHON=""
+  for c in "${GBOS_PYTHON:-}" "$bp"/bin/python3.1[0-9] "$bp/bin/python3" "$(command -v python3 || true)"; do
+    if [ -n "$c" ] && [ -x "$c" ] && "$c" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
+      BUILD_PYTHON="$c"; return
+    fi
+  done
+}

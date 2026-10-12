@@ -33,6 +33,7 @@ The first boot takes about 45 seconds on a M5 MacBook. If you land on a user pic
 - **Xcode command line tools** and **[Homebrew](https://brew.sh)**.
 - The **Android SDK** with an NDK, a build-tools version, and a platform (API 34+). Android Studio's defaults are fine. We build with NDK `28.2.13676358`; if you don't have that one the script uses your newest (30 is reported to work), or set `ANDROID_NDK` to pick.
 - A **JDK**. If you have Android Studio, its bundled one gets picked up automatically.
+- **Python 3.10 or newer** for the build tools (meson). The `python3` that comes with Xcode's command line tools is 3.9, so this usually means `brew install python@3.13`. To use a specific interpreter, set `GBOS_PYTHON`.
 - Optionally, the **Android Emulator** package from the SDK. Bluetooth borrows its virtual radio (see [What doesn't work yet](#what-doesnt-work-yet)); without it the VM boots with no Bluetooth.
 
 `install.sh` checks all of this before it downloads anything, and offers to install what's missing — the Homebrew packages, a JDK, and the Android pieces through Google's `sdkmanager` (you don't need Android Studio). It never asks for `sudo`. Run `./prereqs.sh` on its own to see where you stand.
