@@ -4,7 +4,8 @@
 // absolute mouse events and syncs clipboard text. Same approach as scrcpy's
 // server (InputManager injection as shell), with a small line protocol:
 //   host -> guest:  G width height | M x y | D button | U button | S hscroll vscroll | X | K keycode | C base64-text
-//   guest -> host:  c base64-text (guest clipboard changed) | m tablet|inject (pointer mode)
+//                   P width_mm height_mm natural | F button count [id x y]...
+//   guest -> host:  c base64-text (guest clipboard changed) | m tablet|inject (pointer mode) | p touchpad|none
 // The first line from the host must be "A <token>", matching the random per-boot token the
 // launcher put on the kernel command line (ro.boot.gbos_token). Until then nothing is accepted,
 // so another program on the Mac that grabs the port first cannot drive the guest.
@@ -12,6 +13,9 @@
 // non-direct device), which makes Android draw its own cursor at the exact
 // position. If that cannot be created, events are injected instead and the
 // host cursor is the pointer.
+// Touchpad: a uinput multitouch touchpad the host feeds with the Mac trackpad's raw contacts
+// (F: x and y from 0 to 1, top left origin), so Android's own touchpad stack does the pointer
+// acceleration, two-finger scrolling, pinch and swipes, as on a real touchpad.
 package vm;
 
 import android.content.ClipData;
@@ -45,6 +49,12 @@ public final class Input {
     private static OutputStream tablet;
     private static int tabletW, tabletH;
     private static int tabletDeviceId;
+    private static Process touchpadProcess;
+    private static OutputStream touchpad;
+    private static int padW, padH;
+    private static final int PAD_RES = 12;                 // units per millimetre
+    private static final int[] slotContact = { -1, -1, -1, -1, -1 };  // host contact id per slot
+    private static int nextTracking = 1;
 
     public static void main(String[] args) throws Exception {
         int port = args.length > 0 ? Integer.parseInt(args[0]) : 27183;
@@ -141,6 +151,8 @@ public final class Input {
                 break;
             case 'K': key(Integer.parseInt(p[1])); break;
             case 'C': setClip(p.length > 1 ? new String(Base64.decode(p[1], Base64.NO_WRAP), "UTF-8") : ""); break;
+            case 'P': registerTouchpad(Float.parseFloat(p[1]), Float.parseFloat(p[2]), p.length > 3 && p[3].equals("1")); break;
+            case 'F': touchFrame(p); break;
             default: break;
         }
     }
@@ -193,6 +205,88 @@ public final class Input {
         }
     }
 
+    // BTN_LEFT 272, BTN_TOOL_FINGER 325, BTN_TOOL_QUINTTAP 328, BTN_TOUCH 330, BTN_TOOL_DOUBLETAP 333,
+    // BTN_TOOL_TRIPLETAP 334, BTN_TOOL_QUADTAP 335; ABS_X 0, ABS_Y 1, ABS_MT_SLOT 47,
+    // ABS_MT_POSITION_X 53, ABS_MT_POSITION_Y 54, ABS_MT_TRACKING_ID 57. Configuration type 110 is
+    // UI_SET_PROPBIT: INPUT_PROP_POINTER (0, not a touchscreen) and INPUT_PROP_BUTTONPAD (2, the
+    // whole pad clicks), which is what makes Android treat it as a touchpad.
+    private static void registerTouchpad(float widthMm, float heightMm, boolean natural) {
+        int w = Math.max(100, Math.round(widthMm * PAD_RES)), h = Math.max(100, Math.round(heightMm * PAD_RES));
+        if (touchpad != null && touchpadProcess.isAlive() && w == padW && h == padH) { reply("p touchpad"); return; }
+        try {
+            if (touchpadProcess != null) touchpadProcess.destroy();
+            touchpad = null;
+            touchpadProcess = new ProcessBuilder("/system/bin/uinput", "-").redirectErrorStream(true).start();
+            OutputStream o = touchpadProcess.getOutputStream();
+            String axis = "{\"value\":0,\"minimum\":0,\"maximum\":%d,\"fuzz\":0,\"flat\":0,\"resolution\":%d}";
+            String x = String.format(axis, w - 1, PAD_RES), y = String.format(axis, h - 1, PAD_RES);
+            o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Touchpad\",\"vid\":6900,\"pid\":30466,\"bus\":\"usb\","
+                    + "\"configuration\":[{\"type\":100,\"data\":[1,3]},{\"type\":101,\"data\":[272,325,328,330,333,334,335]},"
+                    + "{\"type\":103,\"data\":[0,1,47,53,54,57]},{\"type\":110,\"data\":[0,2]}],"
+                    + "\"abs_info\":[{\"code\":0,\"info\":" + x + "},{\"code\":1,\"info\":" + y + "},"
+                    + "{\"code\":47,\"info\":" + String.format(axis, slotContact.length - 1, 0) + "},"
+                    + "{\"code\":53,\"info\":" + x + "},{\"code\":54,\"info\":" + y + "},"
+                    + "{\"code\":57,\"info\":" + String.format(axis, 65535, 0) + "}]}\n").getBytes("UTF-8"));
+            o.flush();
+            SystemClock.sleep(1500);
+            if (!touchpadProcess.isAlive()) throw new IllegalStateException("uinput exited " + touchpadProcess.exitValue());
+            touchpad = o; padW = w; padH = h;
+            java.util.Arrays.fill(slotContact, -1);
+            // The Mac decides what is a click (a press, or a tap if the Mac has tap to click), so
+            // Android must not turn taps into clicks as well; scroll direction follows the Mac.
+            Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_tap_to_click", "0" }).waitFor();
+            Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_natural_scrolling", natural ? "1" : "0" }).waitFor();
+            System.out.println("VM_INPUT touchpad registered " + w + "x" + h + (natural ? " natural" : ""));
+            drain(touchpadProcess, "touchpad");
+            reply("p touchpad");
+        } catch (Throwable t) {
+            touchpad = null;
+            System.out.println("VM_INPUT touchpad unavailable: " + t);
+            reply("p none");
+        }
+    }
+
+    // F button count [id x y]...: the contacts now on the Mac trackpad, and the pad's button.
+    private static void touchFrame(String[] p) {
+        if (touchpad == null || !touchpadProcess.isAlive()) { touchpad = null; return; }
+        int button = Integer.parseInt(p[1]), count = Math.min(Integer.parseInt(p[2]), slotContact.length);
+        int[] ids = new int[count], xs = new int[count], ys = new int[count];
+        for (int i = 0; i < count; i++) {
+            ids[i] = Integer.parseInt(p[3 + 3 * i]);
+            xs[i] = Math.round(Math.max(0f, Math.min(1f, Float.parseFloat(p[4 + 3 * i]))) * (padW - 1));
+            ys[i] = Math.round(Math.max(0f, Math.min(1f, Float.parseFloat(p[5 + 3 * i]))) * (padH - 1));
+        }
+        StringBuilder e = new StringBuilder();
+        // Lift the slots whose contact is gone, then place each contact in its slot (a new one gets
+        // a free slot and a fresh tracking id).
+        for (int s = 0; s < slotContact.length; s++) {
+            if (slotContact[s] < 0) continue;
+            boolean present = false;
+            for (int id : ids) present |= id == slotContact[s];
+            if (!present) { e.append("3,47,").append(s).append(",3,57,-1,"); slotContact[s] = -1; }
+        }
+        for (int i = 0; i < count; i++) {
+            int s = -1;
+            for (int k = 0; k < slotContact.length && s < 0; k++) if (slotContact[k] == ids[i]) s = k;
+            e.append("3,47,");
+            if (s < 0) {
+                for (int k = 0; k < slotContact.length && s < 0; k++) if (slotContact[k] < 0) s = k;
+                slotContact[s] = ids[i];
+                e.append(s).append(",3,57,").append(nextTracking++ & 0xFFFF).append(',');
+            } else e.append(s).append(',');
+            e.append("3,53,").append(xs[i]).append(",3,54,").append(ys[i]).append(',');
+        }
+        if (count > 0) e.append("3,0,").append(xs[0]).append(",3,1,").append(ys[0]).append(',');
+        e.append("1,330,").append(count > 0 ? 1 : 0).append(",1,325,").append(count == 1 ? 1 : 0)
+         .append(",1,333,").append(count == 2 ? 1 : 0).append(",1,334,").append(count == 3 ? 1 : 0)
+         .append(",1,335,").append(count == 4 ? 1 : 0).append(",1,328,").append(count >= 5 ? 1 : 0)
+         .append(",1,272,").append(button != 0 ? 1 : 0).append(",0,0,0");
+        try {
+            touchpad.write(("{\"id\":1,\"command\":\"inject\",\"events\":[" + e + "]}\n").getBytes("UTF-8"));
+            touchpad.flush();
+        } catch (Throwable t) { touchpad = null; }
+    }
+
     private static void drain(Process process, String tag) {
         Thread t = new Thread(() -> {
             try (BufferedReader r = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
@@ -211,6 +305,7 @@ public final class Input {
     }
 
     private static void releaseAll() {
+        try { if (touchpad != null) touchFrame(new String[] { "F", "0", "0" }); } catch (Throwable t) { /* gone */ }
         try {
             for (int b = 1; b <= 4 && buttons != 0; b <<= 1) if ((buttons & b) != 0) handle("U " + b);
         } catch (Throwable t) { buttons = 0; }

@@ -20,6 +20,11 @@ static unsigned short scan[128] = {
 @interface VMView : MTKView
 - (void)setHostCursorHidden:(BOOL)hidden;
 - (void)moveBy:(CGPoint)points;
+- (void)sendPadContacts:(NSArray<NSArray<NSNumber *> *> *)contacts;
+- (void)resetTouchpad;
+@property(nonatomic) BOOL touchpadReady;   // the guest has a virtual touchpad for the Mac trackpad
+@property(nonatomic) BOOL touchpadAsked;
+@property(nonatomic) NSUInteger fingers;   // contacts now on the Mac trackpad
 @property(nonatomic,strong) CSInput *input;
 @property(nonatomic) BOOL captured;
 @property(nonatomic) BOOL seamless;
@@ -30,6 +35,9 @@ static unsigned short scan[128] = {
 @property(nonatomic) CGFloat gain;      // guest pixels moved per relative mouse count
 @property(nonatomic) CGPoint believed;  // where we believe the guest cursor is, in guest pixels
 @property(nonatomic) CGPoint carry;     // captured mouse: motion not sent yet, under one guest pixel
+@property(nonatomic,strong) NSMutableDictionary *touchIds;  // NSTouch identity -> small id for the guest
+@property(nonatomic) int nextTouchId, padButton;
+@property(nonatomic,strong) NSArray *padContacts;           // the last contacts sent, for button changes
 @property(nonatomic,strong) NSTrackingArea *tracking;
 @property(nonatomic) BOOL everSynced;
 @property(nonatomic) BOOL haveTarget;
@@ -94,6 +102,7 @@ static unsigned short scan[128] = {
  if(!self.captured && self.input){self.captured=YES;[self.window makeFirstResponder:self];[self.input requestMouseMode:YES];CGAssociateMouseAndMouseCursorPosition(false);[NSCursor hide];self.window.subtitle=@"Mouse captured • ⌃⌥ releases";}
 }
 - (void)releaseCapture {
+ if(self.touchpadReady&&(self.padContacts.count||self.padButton)){self.padButton=0;[self sendPadContacts:@[]];}
  [self.input releaseKeys];
  for(NSNumber *b in @[@(kCSInputButtonLeft),@(kCSInputButtonRight),@(kCSInputButtonMiddle)]) [self.input sendMouseButton:b.unsignedIntegerValue mask:0 pressed:NO];
  self.buttons=0;
@@ -109,6 +118,10 @@ static unsigned short scan[128] = {
  }
  if(!self.seamless&&!self.captured){if(down)[self capture];return;}
  if(self.seamless){[self.window makeFirstResponder:self];if(!self.inside){self.inside=YES;[self setHostCursorHidden:YES];}if(!self.everSynced)[self resync];[self steer:e];}
+ // A left click made on the trackpad is the touchpad's own button, so press-and-drag stays one
+ // gesture there; right and middle clicks keep going through the USB mouse.
+ if(b==kCSInputButtonLeft&&self.captured&&self.touchpadReady&&(self.fingers||self.padButton)){
+  self.padButton=down;[self sendPadContacts:self.padContacts?:@[]];return;}
  if(down)self.buttons|=b;else self.buttons&=~b;
  [self.input sendMouseButton:b mask:self.buttons pressed:down];
 }
@@ -124,8 +137,41 @@ static unsigned short scan[128] = {
   if(!NSPointInRect([self convertPoint:e.locationInWindow fromView:nil],self.bounds)){if(self.inside){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}return;}
   self.inside=YES;if(self.guestCursor)[self setHostCursorHidden:YES];CGPoint g=[self guestPoint:e];self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);return;}
  if(self.seamless){if(self.inside)[self steer:e];return;}
- if(!self.captured)return;[self moveBy:CGPointMake(e.deltaX,e.deltaY)];
+ if(!self.captured)return;
+ // Fingers on the trackpad already move the guest pointer through its touchpad.
+ if(self.touchpadReady&&self.fingers)return;
+ [self moveBy:CGPointMake(e.deltaX,e.deltaY)];
 }
+// Captured trackpad: Android gets the raw contacts on a virtual touchpad and does pointer motion,
+// scrolling and gestures itself, as on a real one, instead of a mouse with macOS's curve applied.
+- (void)touchesBeganWithEvent:(NSEvent *)e {[self trackpad:e];}
+- (void)touchesMovedWithEvent:(NSEvent *)e {[self trackpad:e];}
+- (void)touchesEndedWithEvent:(NSEvent *)e {[self trackpad:e];}
+- (void)touchesCancelledWithEvent:(NSEvent *)e {[self trackpad:e];}
+- (void)trackpad:(NSEvent *)e {
+ NSSet<NSTouch *> *touches=[e touchesMatchingPhase:NSTouchPhaseTouching inView:self];
+ self.fingers=touches.count;
+ if(!self.captured||self.absolute){if(self.padContacts.count)[self sendPadContacts:@[]];return;}
+ if(!self.touchpadReady){
+  // First touch: ask the guest for a touchpad the size of this one (deviceSize is in 1/72 inch).
+  NSTouch *t=touches.anyObject;
+  if(t&&!self.touchpadAsked){self.touchpadAsked=YES;NSNumber *nat=[[NSUserDefaults standardUserDefaults] objectForKey:@"com.apple.swipescrolldirection"];
+   self.sendLine([NSString stringWithFormat:@"P %.1f %.1f %d",t.deviceSize.width*25.4/72,t.deviceSize.height*25.4/72,nat?nat.boolValue:1]);}
+  return;}
+ if(!self.touchIds)self.touchIds=[NSMutableDictionary dictionary];
+ NSMutableArray *contacts=[NSMutableArray array];NSMutableDictionary *seen=[NSMutableDictionary dictionary];
+ for(NSTouch *t in touches){NSNumber *n=self.touchIds[t.identity]?:@(self.nextTouchId++ & 0xffff);seen[t.identity]=n;
+  [contacts addObject:@[n,@(t.normalizedPosition.x),@(1-t.normalizedPosition.y)]];}
+ self.touchIds=seen;
+ [self sendPadContacts:contacts];
+}
+- (void)sendPadContacts:(NSArray<NSArray<NSNumber *> *> *)contacts {
+ self.padContacts=contacts;
+ NSMutableString *l=[NSMutableString stringWithFormat:@"F %d %lu",self.padButton,(unsigned long)contacts.count];
+ for(NSArray<NSNumber *> *c in contacts)[l appendFormat:@" %d %.4f %.4f",c[0].intValue,c[1].doubleValue,c[2].doubleValue];
+ self.sendLine(l);
+}
+- (void)resetTouchpad {self.touchpadReady=NO;self.touchpadAsked=NO;self.padButton=0;self.padContacts=nil;self.touchIds=nil;}
 // Captured mouse: move the guest's relative mouse by a distance in this view's points.
 - (void)moveBy:(CGPoint)points {
  CGFloat scale=MIN(self.bounds.size.width/self.guestSize.width,self.bounds.size.height/self.guestSize.height);if(scale<=0)scale=1;
@@ -139,6 +185,8 @@ static unsigned short scan[128] = {
 - (void)otherMouseDragged:(NSEvent *)e {[self mouseMoved:e];}
 - (void)scrollWheel:(NSEvent *)e {
  if(self.absolute){CGFloat k=e.hasPreciseScrollingDeltas?1.0/16:1.0;if(e.scrollingDeltaX||e.scrollingDeltaY)self.sendLine([NSString stringWithFormat:@"S %.3f %.3f",-e.scrollingDeltaX*k,e.scrollingDeltaY*k]);return;}
+ // A trackpad's two-finger scroll (and its momentum) already reaches the guest's touchpad.
+ if(self.captured&&self.touchpadReady&&e.hasPreciseScrollingDeltas)return;
  if([self live])[self.input sendMouseScroll:kCSInputScrollSmooth buttonMask:self.buttons dy:-e.scrollingDeltaY/10.0];}
 - (void)keyDown:(NSEvent *)e {if([self live] && e.keyCode<128 && scan[e.keyCode])[self.input sendKey:kCSInputKeyPress code:scan[e.keyCode]];}
 - (void)keyUp:(NSEvent *)e {if([self live] && e.keyCode<128 && scan[e.keyCode])[self.input sendKey:kCSInputKeyRelease code:scan[e.keyCode]];}
@@ -158,7 +206,7 @@ static unsigned short scan[128] = {
 @property(nonatomic) BOOL startFullscreen;
 @property(nonatomic,strong) NSWindow *settingsWindow;
 @property(nonatomic,strong) NSTask *vmTask;
-@property(nonatomic,strong) dispatch_source_t glide;
+@property(nonatomic,strong) dispatch_source_t glide, touchTest;
 @property(nonatomic,strong) NSString *runDir;
 @property(nonatomic) BOOL quitting;
 @property(nonatomic) BOOL restarting;
@@ -180,12 +228,17 @@ static double screenRefresh(NSScreen *screen) {
  double hz=mode?CGDisplayModeGetRefreshRate(mode):0;if(mode)CGDisplayModeRelease(mode);
  return hz>0?hz:(double)screen.maximumFramesPerSecond;
 }
+// The Android density that makes a guest `width` pixels wide look like macOS on `screen`.
+static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
+ double points=screen.frame.size.width>0?screen.frame.size.width:width/2.0;
+ return (NSInteger)MAX(120,MIN(640,round(160.0*width/points)));
+}
 @implementation App
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
  [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Bluetooth":@YES}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
- self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
+ self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
  // Started from the Dock or Finder (no socket argument): this app runs the VM itself.
  if(!self.socketPath){setenv("VM_MOUSE_SEAMLESS","0",1);setenv("VM_MOUSE_RELATIVE","0",1);self.startFullscreen=[[NSUserDefaults standardUserDefaults] boolForKey:@"StartFullscreen"];}
  const char *sm=getenv("VM_MOUSE_SEAMLESS"),*gn=getenv("VM_MOUSE_GAIN");self.view.seamless=!(sm&&!strcmp(sm,"0"));
@@ -212,6 +265,17 @@ static double screenRefresh(NSScreen *screen) {
  dispatch_source_set_event_handler(usr2,^{
   // With VM_SELFTEST_GLIDE=1 (tests/perf.py): instead, a slow, perfectly even glide through the
   // captured-mouse path, 0.2 x 0.1 points every 2 ms for 5 s, so the guest can time what arrives.
+  // With VM_SELFTEST_TOUCH=1 as well, the second signal exercises the guest touchpad instead: one
+  // finger glides across it, then two fingers scroll up three times (perf image: Settings is open).
+  if(getenv("VM_SELFTEST_TOUCH")&&self.glide){self.glide=nil;[self ctlSend:@"P 160 100 1"];fprintf(stderr,"SELFTEST touchpad\n");
+   __block int n=0;dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+   dispatch_source_set_timer(t,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),8*NSEC_PER_MSEC,0);
+   dispatch_source_set_event_handler(t,^{int k=n++;VMView *v=self.view;
+    if(k<190)[v sendPadContacts:@[@[@1,@(0.3+0.3*k/190.0),@0.5]]];                       // one finger, 1.5 s
+    else if(k<250)[v sendPadContacts:@[]];
+    else if(k<250+3*110){int r=(k-250)%110;if(r<75)[v sendPadContacts:@[@[@(10+(k-250)/110*2),@0.45,@(0.75-0.45*r/75.0)],@[@(11+(k-250)/110*2),@0.55,@(0.75-0.45*r/75.0)]]];else [v sendPadContacts:@[]];}
+    else{[v sendPadContacts:@[]];dispatch_source_cancel(self.touchTest);fprintf(stderr,"SELFTEST touchpad done\n");}});
+   dispatch_resume(t);self.touchTest=t;return;}
   if(getenv("VM_SELFTEST_GLIDE")){__block int n=0;dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
    dispatch_source_set_timer(t,DISPATCH_TIME_NOW,2*NSEC_PER_MSEC,0);
    dispatch_source_set_event_handler(t,^{[self.view moveBy:CGPointMake(n%2000<1000?.2:-.2,n%2000<1000?.1:-.1)];if(++n>=2500)dispatch_source_cancel(t);});
@@ -257,7 +321,9 @@ static double screenRefresh(NSScreen *screen) {
   for(id m in modes){CGDisplayModeRef mode=(__bridge CGDisplayModeRef)m;
    if(CGDisplayModeGetIOFlags(mode)&0x02000000 /* kDisplayModeNativeFlag */){w=CGDisplayModeGetPixelWidth(mode);h=CGDisplayModeGetPixelHeight(mode);break;}}
   res=[NSString stringWithFormat:@"%.0fx%.0f",w,MIN(h,round(w/1.6))];}
- self.guestDensity=(NSInteger)round(240.0*[res integerValue]/1920.0);
+ // Size Android's UI the way macOS sizes its own: 160 dpi per guest pixel per screen point, so
+ // at the panel's native pixels on a Retina screen that is 320, macOS's own 2x.
+ self.guestDensity=guestDensity([res integerValue],self.window.screen?:NSScreen.mainScreen);
  NSDateFormatter *f=[NSDateFormatter new];f.dateFormat=@"yyyyMMdd-HHmmss";NSString *name=[@"desktop-" stringByAppendingString:[f stringFromDate:[NSDate date]]];
  self.runDir=[[work stringByAppendingPathComponent:@"logs"] stringByAppendingPathComponent:name];
  NSMutableArray *args=[@[runner,work,name,@"--display",res,@"--memory",[[d objectForKey:@"MemoryMiB"] description],@"--cpus",[[d objectForKey:@"CPUs"] description]] mutableCopy];
@@ -325,7 +391,7 @@ static double screenRefresh(NSScreen *screen) {
 - (void)ctlClose {
  if(self.readSource){dispatch_source_cancel(self.readSource);self.readSource=nil;}
  if(self.ctlFd>=0){close(self.ctlFd);self.ctlFd=-1;}
- self.view.absolute=NO;self.view.guestCursor=NO;[self.view setHostCursorHidden:NO];fprintf(stderr,"CONTROL disconnected\n");[self updateSubtitle];
+ self.view.absolute=NO;self.view.guestCursor=NO;[self.view resetTouchpad];[self.view setHostCursorHidden:NO];fprintf(stderr,"CONTROL disconnected\n");[self updateSubtitle];
 }
 - (void)updateSubtitle {
  NSInteger mode=[self pointerMode];
@@ -404,6 +470,7 @@ static double screenRefresh(NSScreen *screen) {
  [self ctlSend:[@"C " stringByAppendingString:[[t dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]]];
 }
 - (void)ctlLine:(NSString *)line {
+ if([line hasPrefix:@"p "]){self.view.touchpadReady=[line isEqualToString:@"p touchpad"];fprintf(stderr,"CONTROL touchpad %s\n",line.UTF8String+2);return;}
  if([line hasPrefix:@"m "]){self.view.guestCursor=[line isEqualToString:@"m tablet"]&&[self pointerMode]==0;if(!self.view.guestCursor||!self.view.inside)[self.view setHostCursorHidden:NO];else [self.view setHostCursorHidden:YES];fprintf(stderr,"CONTROL pointer mode %s\n",line.UTF8String+2);[self updateSubtitle];return;}
  if([line hasPrefix:@"c "]){
   NSData *d=[[NSData alloc] initWithBase64EncodedString:[line substringFromIndex:2] options:0];NSString *t=d?[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]:nil;
@@ -421,7 +488,7 @@ static double screenRefresh(NSScreen *screen) {
   int fd=accept(ls,NULL,NULL);if(fd<0)return;
   if(self.ctlFd>=0)[self ctlClose];
   int yes=1;setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&yes,sizeof yes);
-  self.ctlFd=fd;self.ctlBuffer=[NSMutableData data];[self applyPointerMode];self.sentClipCount=-1;
+  self.ctlFd=fd;self.ctlBuffer=[NSMutableData data];[self.view resetTouchpad];[self applyPointerMode];self.sentClipCount=-1;
   fprintf(stderr,"CONTROL connected\n");[self updateSubtitle];
   const char *tk=getenv("VM_INPUT_TOKEN");if(tk&&*tk)[self ctlSend:[NSString stringWithFormat:@"A %s",tk]];
   [self sendGeometry];[self pushClipboard];
@@ -462,8 +529,9 @@ static double screenRefresh(NSScreen *screen) {
 - (void)spiceForwardedPortClosed:(CSConnection *)c port:(CSPort *)p{}
 @end
 int main(int argc,char **argv){@autoreleasepool {
- // For launch.py, which starts the VM before this window exists: the main screen's refresh rate.
- if(argc==2&&!strcmp(argv[1],"--screen-refresh")){printf("%g\n",screenRefresh(NSScreen.mainScreen));return 0;}
+ // For launch.py, which starts the VM before this window exists: the main screen's refresh rate
+ // and the Android density for a guest WIDTH pixels wide on it.
+ if(argc==3&&!strcmp(argv[1],"--screen")){printf("%g %ld\n",screenRefresh(NSScreen.mainScreen),(long)guestDensity(atol(argv[2]),NSScreen.mainScreen));return 0;}
  if(argc>3){fprintf(stderr,"Usage: GooglebookViewer [/absolute/path/to/spice.sock [--fullscreen]]\n");return 2;}
  NSApplication *app=[NSApplication sharedApplication];[app setActivationPolicy:NSApplicationActivationPolicyRegular];
  // Menu bar. Actions have no target, so they reach the app delegate through the responder chain.

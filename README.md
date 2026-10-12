@@ -55,7 +55,7 @@ Quitting (or closing the window) shuts Android down properly. Your data lives in
 
 **Settings** (`⌘,`) has the pointer mode, resolution, memory, CPU cores, and toggles for networking, audio and Bluetooth. Pointer mode changes right away; everything else is a VM option, so it applies the next time you start it.
 
-Resolution defaults to your display's native pixels at 16:10. On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel.
+Resolution defaults to your display's native pixels at 16:10, and Android's UI is sized the way macOS sizes its own (density 320 at native resolution on a Retina screen, macOS's 2x). On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel.
 
 ### Updating
 
@@ -72,7 +72,7 @@ If you'd rather drive it from a terminal, `python3 run/launch.py work` does the 
 
 ### Pointer modes
 
-**Captured mouse** is the default: click the window to grab the mouse, `⌃⌥` to let go. It's the classic VM experience — a plain USB mouse as far as Android is concerned, so it behaves. Android's own pointer acceleration is switched off after boot, since macOS has already accelerated the movement.
+**Captured mouse** is the default: click the window to grab the mouse, `⌃⌥` to let go. It's the classic VM experience — a plain USB mouse as far as Android is concerned, so it behaves. Android's own pointer acceleration is switched off after boot, since macOS has already accelerated the movement. On a Mac trackpad, Android gets a real touchpad instead: the viewer passes your raw finger positions to a virtual multitouch touchpad in the guest, so Android does its own pointer acceleration, two-finger scrolling, pinch and swipes. Clicks follow your Mac's settings (press, or tap if you have tap to click on), and so does the scroll direction.
 
 There are two integrated modes where the pointer moves in and out of the window freely. They're labelled **experimental** because they're still kind of buggy:
 
