@@ -78,12 +78,12 @@ def main():
         # A viewer sample covers the 5 s before it was printed; keep those wholly inside the round.
         fps = [float(re.search(r'NATIVE_GL_SCANOUT ([0-9.]+)', l).group(1)) for t, s, l in events
                if s == 'viewer' and 'NATIVE_GL_SCANOUT' in l and 'start' in w and 'end' in w and w['start'] + 5 <= t <= w['end'] + 1]
-        present = [re.search(r'NATIVE_PRESENT (\d+) frames median ([0-9.]+) ms uneven ([0-9.]+)% screen (\d+)', l).groups() for t, s, l in events
+        present = [re.search(r'NATIVE_PRESENT (\d+) frames median ([0-9.]+) ms uneven ([0-9.]+)% dropped ([0-9.]+)% held ([0-9.]+) ms screen (\d+)', l).groups() for t, s, l in events
                    if s == 'viewer' and 'NATIVE_PRESENT' in l and 'start' in w and 'end' in w and w['start'] + 5 <= t <= w['end'] + 1]
         report['rounds'].append({'round': rnd, 'seconds': round(w.get('end', 0) - w.get('start', 0), 1), 'guest': stats,
                                  'viewer_fps': {'samples': fps, 'median': statistics.median(fps) if fps else None},
-                                 'on_screen': [{'frames': int(n), 'median_ms': float(m), 'uneven_pct': float(u), 'screen_hz': int(h)}
-                                               for n, m, u, h in present]})
+                                 'on_screen': [{'frames': int(n), 'median_ms': float(m), 'uneven_pct': float(u), 'dropped_pct': float(dr), 'held_ms': float(hd),
+                                                'screen_hz': int(h)} for n, m, u, dr, hd, h in present]})
     (run / 'perf.json').write_text(json.dumps(report, indent=1))
     print(json.dumps(report, indent=1))
 

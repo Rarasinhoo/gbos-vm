@@ -72,7 +72,7 @@ If you'd rather drive it from a terminal, `python3 run/launch.py work` does the 
 
 ### Pointer modes
 
-**Captured mouse** is the default: click the window to grab the mouse, `⌃⌥` to let go. It's the classic VM experience — a plain USB mouse as far as Android is concerned, so it behaves.
+**Captured mouse** is the default: click the window to grab the mouse, `⌃⌥` to let go. It's the classic VM experience — a plain USB mouse as far as Android is concerned, so it behaves. Android's own pointer acceleration is switched off after boot, since macOS has already accelerated the movement.
 
 There are two integrated modes where the pointer moves in and out of the window freely. They're labelled **experimental** because they're still kind of buggy:
 
@@ -96,7 +96,8 @@ So: treat it like a dev VM. It's great for poking at the OS. I wouldn’t daily 
 ## What doesn't work yet
 
 - **Bluetooth is virtual only.** If you have the Android Emulator installed, the VM gets its simulated radio (`netsimd`): Bluetooth turns on, but there's nothing real to pair with. Actual devices would need a USB dongle bridged in, which we haven't built. Without the emulator, Android is told it has no Bluetooth at all.
-- **The guest refreshes at 60 or 75 Hz, nothing else.** QEMU always describes its display as 75 Hz and has no setting for it; without that description the guest makes its own 59.95 Hz mode. The VM picks whichever lines up better with the screen the window opens on: 60 for 60/120 Hz screens, 75 for 75/85/144 Hz ones. Move the window to a different screen and it keeps the old rate until the next restart. Guest frames aren't locked to the Mac's refresh either, so a little judder remains: about one frame in five holds a refresh too long while scrolling on a 120 Hz screen (it was nine in ten at 75 Hz). `tests/perf.py` measures it.
+- **The refresh rate follows the screen the window opens on**, up to 120 Hz (a 144 Hz screen gets 72). QEMU hard-codes 75 Hz in the display description it gives the guest, so the runner patches that one constant in a copy of QEMU's library (`work/host/qemu-aarch64-softmmu-<rate>mhz`); if a future UTM build changes that code, it falls back to 60 or 75 Hz, whichever lines up better. Move the window to another screen and it keeps the old rate until the next restart. At 120 Hz and full native resolution the guest's GPU is near its limit, so heavy scrolling occasionally misses a frame.
+- **Frames are shown on the guest's clock**, not as they arrive: the viewer rebuilds the guest's frame timing and shows every frame the same few milliseconds after it was due (about 7 ms at 120 Hz), so jitter in the copy from the guest doesn't make frames stay up a refresh too long or too short. `VM_NO_PACING=1` turns this off. `tests/perf.py` measures it.
 - **Flat shading can be wrong.** Chrome needs a Vulkan extension MoltenVK doesn't have, so we tell the guest it exists. That's fine for almost everything; `flat`-interpolated WebGL content may pick the wrong vertex.
 - **Copying *out* of the guest, right-click, and long sessions** are implemented but haven't had a proper test. They might be fine. They might not.
 - **Audio was silent on one boot** and then worked. We don't know why yet.

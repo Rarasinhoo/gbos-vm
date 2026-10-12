@@ -163,6 +163,12 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) NSMutableData *ctlBuffer;
 @property(nonatomic) NSInteger sentClipCount;
 @end
+// A screen's refresh rate in Hz, as precisely as macOS reports it (59.94 rather than 60).
+static double screenRefresh(NSScreen *screen) {
+ CGDirectDisplayID did=[screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];CGDisplayModeRef mode=CGDisplayCopyDisplayMode(did);
+ double hz=mode?CGDisplayModeGetRefreshRate(mode):0;if(mode)CGDisplayModeRelease(mode);
+ return hz>0?hz:(double)screen.maximumFramesPerSecond;
+}
 @implementation App
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
  [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Bluetooth":@YES}];
@@ -241,7 +247,7 @@ static unsigned short scan[128] = {
  if(![d boolForKey:@"Audio"])[args addObject:@"--no-audio"];
  if(![d boolForKey:@"Bluetooth"])[args addObject:@"--no-bluetooth"];
  // Pace the guest to the screen the window opens on (see guest_refresh in run_vm.py).
- [args addObjectsFromArray:@[@"--host-refresh",[NSString stringWithFormat:@"%ld",(long)(self.window.screen?:NSScreen.mainScreen).maximumFramesPerSecond]]];
+ [args addObjectsFromArray:@[@"--host-refresh",[NSString stringWithFormat:@"%g",screenRefresh(self.window.screen?:NSScreen.mainScreen)]]];
  NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];t.arguments=args;
  t.standardOutput=[NSFileHandle fileHandleWithNullDevice];t.standardError=[NSFileHandle fileHandleWithNullDevice];
  __weak App *weak=self;
@@ -433,7 +439,7 @@ static unsigned short scan[128] = {
 @end
 int main(int argc,char **argv){@autoreleasepool {
  // For launch.py, which starts the VM before this window exists: the main screen's refresh rate.
- if(argc==2&&!strcmp(argv[1],"--screen-refresh")){printf("%ld\n",(long)NSScreen.mainScreen.maximumFramesPerSecond);return 0;}
+ if(argc==2&&!strcmp(argv[1],"--screen-refresh")){printf("%g\n",screenRefresh(NSScreen.mainScreen));return 0;}
  if(argc>3){fprintf(stderr,"Usage: GooglebookViewer [/absolute/path/to/spice.sock [--fullscreen]]\n");return 2;}
  NSApplication *app=[NSApplication sharedApplication];[app setActivationPolicy:NSApplicationActivationPolicyRegular];
  // Menu bar. Actions have no target, so they reach the app delegate through the responder chain.

@@ -13,7 +13,7 @@ Bluetooth: if the Android emulator's netsimd is installed (SDK "emulator" packag
 GBOS_NETSIMD), it is started as a virtual Bluetooth controller and Android is told it has
 Bluetooth. Otherwise, or with --no-bluetooth, the guest boots with no Bluetooth at all.
 """
-import argparse, atexit, fcntl, json, os, secrets, signal, socket, subprocess, sys
+import argparse, atexit, fcntl, json, math, os, secrets, signal, socket, subprocess, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -60,12 +60,51 @@ def start_netsimd(binary, out):
     return proc, port
 
 
-def guest_refresh(host_hz):
-    """The guest refresh rate (60 or 75) whose frames land most evenly on a host_hz screen.
-    QEMU's display description (EDID) says 75 Hz and cannot be changed; without one, the guest
-    driver makes its own mode at 59.95 Hz. Those are the only two rates on offer. A screen that is
-    a whole multiple of one shows every frame for the same time; otherwise the rate with fewer
-    uneven frames per second (the beat against the nearest multiple) wins."""
+def qemu_at_refresh(host, hz):
+    """A copy of QEMU's library whose display description (EDID) says hz instead of 75 Hz, or
+    None if this QEMU build doesn't look like the one we know how to change.
+
+    qemu_edid_generate() uses `info->refresh_rate ?: 75000` (millihertz), and nothing in this
+    setup ever fills refresh_rate in. The fallback is two instructions, MOVZ/MOVK Wd building
+    75000, right before the CSEL that picks it; we rewrite their immediates. The copy sits beside
+    the original (it finds the patched renderer via @loader_path), is ad-hoc signed like the
+    original, and is kept for the next boot at the same rate."""
+    base = host / 'qemu-aarch64-softmmu'
+    mhz = round(hz * 1000)
+    if mhz == 75000: return base
+    out = host / f'qemu-aarch64-softmmu-{mhz}mhz'
+    if out.exists() and out.stat().st_mtime >= base.stat().st_mtime: return out
+    tmp = out.with_suffix('.tmp')
+    try:
+        subprocess.run(['/usr/bin/lipo', '-thin', 'arm64', str(base), '-output', str(tmp)], check=True, capture_output=True)
+        code = bytearray(tmp.read_bytes())
+        word = lambda o: int.from_bytes(code[o:o + 4], 'little')
+        sites = [o for o in range(0, len(code) - 16, 4)
+                 if word(o) & 0xFFFFFFE0 == 0x52800000 | 0x24F8 << 5                     # movz wD, #0x24f8
+                 and word(o + 4) == 0x72A00020 | word(o) & 31                             # movk wD, #0x1, lsl #16
+                 and any(word(o + k) & 0x7FE00C00 == 0x1A800000 for k in (8, 12))]        # csel follows
+        if len(sites) != 1: raise ValueError(f'{len(sites)} candidate sites')
+        rd = word(sites[0]) & 31
+        code[sites[0]:sites[0] + 8] = ((0x52800000 | (mhz & 0xFFFF) << 5 | rd).to_bytes(4, 'little')
+                                       + (0x72A00000 | (mhz >> 16) << 5 | rd).to_bytes(4, 'little'))
+        tmp.write_bytes(code)
+        subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(tmp)], check=True, capture_output=True)
+        tmp.rename(out)
+        return out
+    except (OSError, subprocess.CalledProcessError, ValueError) as e:
+        print(f'cannot set the guest refresh rate in this QEMU ({e}); using 60 or 75 Hz', flush=True)
+        tmp.unlink(missing_ok=True)
+        return None
+
+
+def guest_refresh(host_hz, any_rate=True):
+    """The guest refresh rate that paces best on a host_hz screen. With a QEMU we can patch
+    (any_rate), that is the screen's own rate, or a whole fraction of it above 120 Hz (144 -> 72)
+    to keep the guest's GPU load sane. Otherwise only 60 Hz (no EDID: the guest driver's own
+    59.95 Hz mode) and 75 Hz (QEMU's EDID) are on offer: a screen that is a whole multiple of one
+    shows every frame for the same time, and failing that the rate with fewer uneven frames per
+    second (the beat against the nearest multiple) wins."""
+    if any_rate: return host_hz / math.ceil(host_hz / 120 - 1e-6)
     beat = lambda r: min(abs(host_hz - k * r) for k in range(1, 5))
     return min((60, 75), key=lambda r: beat(59.95 if r == 60 else 75))
 
@@ -79,7 +118,7 @@ def main():
     a.add_argument('--display', default='1920x1200'); a.add_argument('--memory', type=int, default=4096)
     a.add_argument('--cpus', type=int, default=6)
     a.add_argument('--host-refresh', type=float, help="the Mac screen's refresh rate; picks the guest rate that paces best on it")
-    a.add_argument('--refresh', type=int, choices=(60, 75), help='guest refresh rate (overrides --host-refresh; default 75)')
+    a.add_argument('--refresh', type=float, help='guest refresh rate in Hz (overrides --host-refresh; default 75)')
     a.add_argument('--image', help='image folder (default WORK/image)')
     args = a.parse_args()
     work = Path(args.work).resolve()
@@ -91,7 +130,12 @@ def main():
         if not p.exists(): sys.exit(f'missing: {p}')
     width, height = args.display.split('x')
     refresh = args.refresh or (guest_refresh(args.host_refresh) if args.host_refresh else 75)
-    print('guest refresh:', refresh, 'Hz' + (f' (Mac screen {args.host_refresh:g} Hz)' if args.host_refresh else ''), flush=True)
+    qemu, edid = qemu_at_refresh(host, refresh), True
+    if qemu is None:  # an unknown QEMU build: fall back to the two rates it offers unmodified
+        refresh = guest_refresh(args.host_refresh or refresh, any_rate=False)
+        qemu, edid = host / 'qemu-aarch64-softmmu', refresh != 60
+        if not edid: refresh = 59.95
+    print(f'guest refresh: {refresh:g} Hz' + (f' (Mac screen {args.host_refresh:g} Hz)' if args.host_refresh else ''), flush=True)
     (work / 'logs').mkdir(exist_ok=True)
     lock = (work / 'logs/vm.lock').open('a')
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -100,7 +144,7 @@ def main():
     # Random per-boot secret for the pointer/clipboard link (see guest/input).
     token = secrets.token_hex(16)
     (out / 'token').write_text(token); os.chmod(out / 'token', 0o600)
-    (out / 'refresh').write_text(f'{59.95 if refresh == 60 else 75}\n')  # the viewer paces frames to it
+    (out / 'refresh').write_text(f'{refresh:g}\n')  # the viewer locks its presentation to it
 
     netsim, cmdline = None, CMDLINE + ' androidboot.gbos_token=' + token
     netsimd = None if args.no_bluetooth else find_netsimd()
@@ -112,7 +156,7 @@ def main():
     cmd = [str(host / 'qemu-interop'), '-L', str(utm / 'Contents/Resources/qemu'), '-nodefaults', '-vga', 'none',
            '-nic', 'none', '-device', 'virtio-gpu-gl-pci,hostmem=8G,blob=true,venus=true',
            '-global', f'virtio-gpu-gl-pci.xres={width}', '-global', f'virtio-gpu-gl-pci.yres={height}',
-           *(['-global', 'virtio-gpu-gl-pci.edid=off'] if refresh == 60 else []),
+           *([] if edid else ['-global', 'virtio-gpu-gl-pci.edid=off']),
            '-cpu', 'host', '-smp', f'cpus={args.cpus},sockets=1,cores={args.cpus},threads=1',
            '-machine', 'virt,gic-version=3,highmem=on,highmem-ecam=off', '-accel', 'hvf,ipa-granule-size=0x1000',
            '-m', str(args.memory), '-audio', 'none',
@@ -135,7 +179,7 @@ def main():
                 '-device', 'virtconsole,chardev=bluetooth']
     if not args.no_audio:
         cmd += ['-audiodev', 'coreaudio,id=audio0', '-device', 'usb-audio,audiodev=audio0,bus=xhci.0']
-    env = dict(os.environ, VM_QEMU_LIBRARY=str(host / 'qemu-aarch64-softmmu'),
+    env = dict(os.environ, VM_QEMU_LIBRARY=str(qemu),
                DYLD_FRAMEWORK_PATH=str(utm / 'Contents/Frameworks'),
                RENDER_SERVER_EXEC_PATH=str(host / 'virgl_render_server'),
                VK_DRIVER_FILES=str(utm / 'Contents/Resources/vulkan/icd.d/MoltenVK_icd.json'),
