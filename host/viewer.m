@@ -1,5 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <MetalKit/MetalKit.h>
+#import <IOKit/ps/IOPowerSources.h>
+#import <IOKit/ps/IOPSKeys.h>
 #import "CocoaSpice.h"
 #import "CSDisplay+Protected.h"
 #import "CSMetalRenderer.h"
@@ -207,6 +209,7 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) NSWindow *settingsWindow;
 @property(nonatomic,strong) NSTask *vmTask;
 @property(nonatomic,strong) dispatch_source_t glide, touchTest;
+@property(nonatomic,strong) id<NSObject> activity;
 @property(nonatomic,strong) NSString *runDir;
 @property(nonatomic) BOOL quitting;
 @property(nonatomic) BOOL restarting;
@@ -228,6 +231,19 @@ static double screenRefresh(NSScreen *screen) {
  double hz=mode?CGDisplayModeGetRefreshRate(mode):0;if(mode)CGDisplayModeRelease(mode);
  return hz>0?hz:(double)screen.maximumFramesPerSecond;
 }
+// The Mac's battery as the guest helper's B line: level, on AC power, charging. Macs without one
+// report AC power at 100%, which is what Android should show for them too.
+static NSString *batteryLine(void) {
+ int level=100,plugged=1,charging=0;
+ CFTypeRef info=IOPSCopyPowerSourcesInfo();CFArrayRef list=info?IOPSCopyPowerSourcesList(info):NULL;
+ for(CFIndex i=0;list&&i<CFArrayGetCount(list);i++){
+  NSDictionary *d=(__bridge NSDictionary *)IOPSGetPowerSourceDescription(info,CFArrayGetValueAtIndex(list,i));
+  if(![d[@kIOPSTypeKey] isEqualToString:@kIOPSInternalBatteryType])continue;
+  int cur=[d[@kIOPSCurrentCapacityKey] intValue],max=[d[@kIOPSMaxCapacityKey] intValue];
+  level=max>0?(int)lround(100.0*cur/max):cur;plugged=[d[@kIOPSPowerSourceStateKey] isEqualToString:@kIOPSACPowerValue];charging=[d[@kIOPSIsChargingKey] boolValue];break;}
+ if(list)CFRelease(list);if(info)CFRelease(info);
+ return [NSString stringWithFormat:@"B %d %d %d",level,plugged,charging];
+}
 // The Android density that makes a guest `width` pixels wide look like macOS on `screen`.
 static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  double points=screen.frame.size.width>0?screen.frame.size.width:width/2.0;
@@ -235,6 +251,9 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 }
 @implementation App
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+ // A VM runs on while its window is in the background, and the guest waits on this app for every
+ // frame: keep App Nap from throttling us to a few timer wakeups a second (sleep stays allowed).
+ self.activity=[[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep|NSActivityLatencyCritical reason:@"Running the Googlebook VM"];
  [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Bluetooth":@YES}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
@@ -247,7 +266,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  self.renderer=[[CSMetalRenderer alloc] initWithMetalKitView:self.view];self.view.delegate=self.renderer;
  self.window.contentView=self.view;[self.window center];[self.window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];
  if(self.startFullscreen)[self.window toggleFullScreen:nil];
- __weak App *weakSelf=self;self.view.sendLine=^(NSString *l){[weakSelf ctlSend:l];};[self startControlServer];
+ __weak App *weakSelf=self;self.view.sendLine=^(NSString *l){[weakSelf ctlSend:l];};[self startControlServer];[self watchBattery];
  [CSMain.sharedInstance spiceSetDebug:NO];
  if(![CSMain.sharedInstance spiceStart]){fprintf(stderr,"SPICE worker failed\n");[NSApp terminate:nil];return;}
  if(self.socketPath)[self connectSpice];else [self startVM];
@@ -269,8 +288,10 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   // finger glides across it, then two fingers scroll up three times (perf image: Settings is open).
   if(getenv("VM_SELFTEST_TOUCH")&&self.glide){self.glide=nil;[self ctlSend:@"P 160 100 1"];fprintf(stderr,"SELFTEST touchpad\n");
    __block int n=0;dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
-   dispatch_source_set_timer(t,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),8*NSEC_PER_MSEC,0);
-   dispatch_source_set_event_handler(t,^{int k=n++;VMView *v=self.view;
+   dispatch_source_set_timer(t,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),8*NSEC_PER_MSEC,0);
+   __block CFTimeInterval t0=0;
+   dispatch_source_set_event_handler(t,^{VMView *v=self.view;if(!v.touchpadReady)return;  // as real touches do
+    int k=n++;if(!k)t0=CACurrentMediaTime();if(k&&k%100==0)fprintf(stderr,"SELFTEST touchpad sent %d frames in %.0f ms\n",k,1000*(CACurrentMediaTime()-t0));
     if(k<190)[v sendPadContacts:@[@[@1,@(0.3+0.3*k/190.0),@0.5]]];                       // one finger, 1.5 s
     else if(k<250)[v sendPadContacts:@[]];
     else if(k<250+3*110){int r=(k-250)%110;if(r<75)[v sendPadContacts:@[@[@(10+(k-250)/110*2),@0.45,@(0.75-0.45*r/75.0)],@[@(11+(k-250)/110*2),@0.55,@(0.75-0.45*r/75.0)]]];else [v sendPadContacts:@[]];}
@@ -388,6 +409,14 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  NSData *d=[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
  if(write(self.ctlFd,d.bytes,d.length)!=(ssize_t)d.length)[self ctlClose];
 }
+// The Mac's battery changed (or a minute passed): tell the guest, which shows it as its own.
+- (void)sendBattery {if(self.ctlFd>=0)[self ctlSend:batteryLine()];}
+static void batteryChanged(void *context) {[(__bridge App *)context sendBattery];}
+- (void)watchBattery {
+ CFRunLoopSourceRef src=IOPSNotificationCreateRunLoopSource(batteryChanged,(__bridge void *)self);
+ if(src){CFRunLoopAddSource(CFRunLoopGetMain(),src,kCFRunLoopDefaultMode);CFRelease(src);}
+ [NSTimer scheduledTimerWithTimeInterval:60 repeats:YES block:^(NSTimer *t){[self sendBattery];}];
+}
 - (void)ctlClose {
  if(self.readSource){dispatch_source_cancel(self.readSource);self.readSource=nil;}
  if(self.ctlFd>=0){close(self.ctlFd);self.ctlFd=-1;}
@@ -491,6 +520,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   self.ctlFd=fd;self.ctlBuffer=[NSMutableData data];[self.view resetTouchpad];[self applyPointerMode];self.sentClipCount=-1;
   fprintf(stderr,"CONTROL connected\n");[self updateSubtitle];
   const char *tk=getenv("VM_INPUT_TOKEN");if(tk&&*tk)[self ctlSend:[NSString stringWithFormat:@"A %s",tk]];
+  [self ctlSend:batteryLine()];
   [self sendGeometry];[self pushClipboard];
   dispatch_source_t rs=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,fd,0,dispatch_get_main_queue());self.readSource=rs;
   dispatch_source_set_event_handler(rs,^{

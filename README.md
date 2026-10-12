@@ -51,7 +51,7 @@ We build and test on one machine (M5, 16 GB, macOS 27). A couple of people have 
 | `⌘V` | Paste the Mac clipboard into the guest |
 | `⌘,` | Settings |
 
-Quitting (or closing the window) shuts Android down properly. Your data lives in `work/image/googlebook.raw` and sticks around between runs.
+Android shows your Mac's battery: its level, and whether it is charging (a VM has no battery of its own, so it used to read empty). Quitting (or closing the window) shuts Android down properly. Your data lives in `work/image/googlebook.raw` and sticks around between runs.
 
 **Settings** (`⌘,`) has the pointer mode, resolution, memory, CPU cores, and toggles for networking, audio and Bluetooth. Pointer mode changes right away; everything else is a VM option, so it applies the next time you start it.
 

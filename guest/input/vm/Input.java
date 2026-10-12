@@ -4,7 +4,7 @@
 // absolute mouse events and syncs clipboard text. Same approach as scrcpy's
 // server (InputManager injection as shell), with a small line protocol:
 //   host -> guest:  G width height | M x y | D button | U button | S hscroll vscroll | X | K keycode | C base64-text
-//                   P width_mm height_mm natural | F button count [id x y]...
+//                   P width_mm height_mm natural | F button count [id x y]... | B level plugged charging
 //   guest -> host:  c base64-text (guest clipboard changed) | m tablet|inject (pointer mode) | p touchpad|none
 // The first line from the host must be "A <token>", matching the random per-boot token the
 // launcher put on the kernel command line (ro.boot.gbos_token). Until then nothing is accepted,
@@ -153,6 +153,7 @@ public final class Input {
             case 'C': setClip(p.length > 1 ? new String(Base64.decode(p[1], Base64.NO_WRAP), "UTF-8") : ""); break;
             case 'P': registerTouchpad(Float.parseFloat(p[1]), Float.parseFloat(p[2]), p.length > 3 && p[3].equals("1")); break;
             case 'F': touchFrame(p); break;
+            case 'B': battery(Integer.parseInt(p[1]), p[2].equals("1"), p[3].equals("1")); break;
             default: break;
         }
     }
@@ -207,7 +208,9 @@ public final class Input {
 
     // BTN_LEFT 272, BTN_TOOL_FINGER 325, BTN_TOOL_QUINTTAP 328, BTN_TOUCH 330, BTN_TOOL_DOUBLETAP 333,
     // BTN_TOOL_TRIPLETAP 334, BTN_TOOL_QUADTAP 335; ABS_X 0, ABS_Y 1, ABS_MT_SLOT 47,
-    // ABS_MT_POSITION_X 53, ABS_MT_POSITION_Y 54, ABS_MT_TRACKING_ID 57. Configuration type 110 is
+    // ABS_MT_POSITION_X 53, ABS_MT_POSITION_Y 54, ABS_MT_TRACKING_ID 57, ABS_MT_TOUCH_MAJOR 48,
+    // ABS_MT_TOUCH_MINOR 49, ABS_MT_PRESSURE 58 (the Mac reports neither size nor pressure per
+    // finger, but Android's touchpad gestures need both to tell a finger from a hover). Type 110 is
     // UI_SET_PROPBIT: INPUT_PROP_POINTER (0, not a touchscreen) and INPUT_PROP_BUTTONPAD (2, the
     // whole pad clicks), which is what makes Android treat it as a touchpad.
     private static void registerTouchpad(float widthMm, float heightMm, boolean natural) {
@@ -222,11 +225,13 @@ public final class Input {
             String x = String.format(axis, w - 1, PAD_RES), y = String.format(axis, h - 1, PAD_RES);
             o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Touchpad\",\"vid\":6900,\"pid\":30466,\"bus\":\"usb\","
                     + "\"configuration\":[{\"type\":100,\"data\":[1,3]},{\"type\":101,\"data\":[272,325,328,330,333,334,335]},"
-                    + "{\"type\":103,\"data\":[0,1,47,53,54,57]},{\"type\":110,\"data\":[0,2]}],"
+                    + "{\"type\":103,\"data\":[0,1,24,47,48,49,53,54,57,58]},{\"type\":110,\"data\":[0,2]}],"
                     + "\"abs_info\":[{\"code\":0,\"info\":" + x + "},{\"code\":1,\"info\":" + y + "},"
                     + "{\"code\":47,\"info\":" + String.format(axis, slotContact.length - 1, 0) + "},"
                     + "{\"code\":53,\"info\":" + x + "},{\"code\":54,\"info\":" + y + "},"
-                    + "{\"code\":57,\"info\":" + String.format(axis, 65535, 0) + "}]}\n").getBytes("UTF-8"));
+                    + "{\"code\":57,\"info\":" + String.format(axis, 65535, 0) + "},"
+                    + "{\"code\":24,\"info\":" + String.format(axis, 255, 0) + "},{\"code\":58,\"info\":" + String.format(axis, 255, 0) + "},"
+                    + "{\"code\":48,\"info\":" + String.format(axis, 255, 1) + "},{\"code\":49,\"info\":" + String.format(axis, 255, 1) + "}]}\n").getBytes("UTF-8"));
             o.flush();
             SystemClock.sleep(1500);
             if (!touchpadProcess.isAlive()) throw new IllegalStateException("uinput exited " + touchpadProcess.exitValue());
@@ -234,8 +239,15 @@ public final class Input {
             java.util.Arrays.fill(slotContact, -1);
             // The Mac decides what is a click (a press, or a tap if the Mac has tap to click), so
             // Android must not turn taps into clicks as well; scroll direction follows the Mac.
-            Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_tap_to_click", "0" }).waitFor();
-            Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_natural_scrolling", natural ? "1" : "0" }).waitFor();
+            // In the background: each `settings` call takes about a second, and touches must not wait.
+            Thread prefs = new Thread(() -> {
+                try {
+                    Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_tap_to_click", "0" }).waitFor();
+                    Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_natural_scrolling", natural ? "1" : "0" }).waitFor();
+                } catch (Throwable t) { System.out.println("VM_INPUT touchpad settings: " + t); }
+            }, "touchpad-settings");
+            prefs.setDaemon(true);
+            prefs.start();
             System.out.println("VM_INPUT touchpad registered " + w + "x" + h + (natural ? " natural" : ""));
             drain(touchpadProcess, "touchpad");
             reply("p touchpad");
@@ -247,8 +259,11 @@ public final class Input {
     }
 
     // F button count [id x y]...: the contacts now on the Mac trackpad, and the pad's button.
+    private static int framesSeen; private static long firstFrame;
     private static void touchFrame(String[] p) {
         if (touchpad == null || !touchpadProcess.isAlive()) { touchpad = null; return; }
+        if (framesSeen++ == 0) firstFrame = SystemClock.uptimeMillis();
+        else if (framesSeen % 100 == 0) System.out.println("VM_INPUT touchpad got " + framesSeen + " frames in " + (SystemClock.uptimeMillis() - firstFrame) + " ms");
         int button = Integer.parseInt(p[1]), count = Math.min(Integer.parseInt(p[2]), slotContact.length);
         int[] ids = new int[count], xs = new int[count], ys = new int[count];
         for (int i = 0; i < count; i++) {
@@ -274,9 +289,11 @@ public final class Input {
                 slotContact[s] = ids[i];
                 e.append(s).append(",3,57,").append(nextTracking++ & 0xFFFF).append(',');
             } else e.append(s).append(',');
-            e.append("3,53,").append(xs[i]).append(",3,54,").append(ys[i]).append(',');
+            // A typical fingertip on a trackpad: about 10 x 8 mm, moderate pressure.
+            e.append("3,53,").append(xs[i]).append(",3,54,").append(ys[i]).append(",3,48,10,3,49,8,3,58,60,");
         }
-        if (count > 0) e.append("3,0,").append(xs[0]).append(",3,1,").append(ys[0]).append(',');
+        if (count > 0) e.append("3,0,").append(xs[0]).append(",3,1,").append(ys[0]).append(",3,24,60,");
+        else e.append("3,24,0,");
         e.append("1,330,").append(count > 0 ? 1 : 0).append(",1,325,").append(count == 1 ? 1 : 0)
          .append(",1,333,").append(count == 2 ? 1 : 0).append(",1,334,").append(count == 3 ? 1 : 0)
          .append(",1,335,").append(count == 4 ? 1 : 0).append(",1,328,").append(count >= 5 ? 1 : 0)
@@ -285,6 +302,22 @@ public final class Input {
             touchpad.write(("{\"id\":1,\"command\":\"inject\",\"events\":[" + e + "]}\n").getBytes("UTF-8"));
             touchpad.flush();
         } catch (Throwable t) { touchpad = null; }
+    }
+
+    // B: the Mac's battery, so Android shows it instead of an empty one (a VM has none). The level
+    // goes first: an override that unplugs before raising the level is an empty battery, and
+    // Android shuts down at once. Status: 2 charging, 3 discharging, 5 full.
+    private static int batteryLevel = -1;
+    private static boolean batteryPlugged, batteryCharging;
+    private static void battery(int level, boolean plugged, boolean charging) throws Exception {
+        level = Math.max(1, Math.min(100, level));
+        if (level == batteryLevel && plugged == batteryPlugged && charging == batteryCharging) return;
+        String status = charging ? "2" : plugged ? "5" : "3";
+        for (String[] a : new String[][] { { "level", String.valueOf(level) }, { "present", "1" }, { "ac", plugged ? "1" : "0" },
+                                           { "usb", "0" }, { "wireless", "0" }, { "status", status } })
+            Runtime.getRuntime().exec(new String[] { "cmd", "battery", "set", a[0], a[1] }).waitFor();
+        if (batteryLevel < 0) System.out.println("VM_INPUT battery " + level + "%" + (plugged ? " plugged" : "") + (charging ? " charging" : ""));
+        batteryLevel = level; batteryPlugged = plugged; batteryCharging = charging;
     }
 
     private static void drain(Process process, String tag) {
