@@ -43,7 +43,9 @@ def main():
     elif 'x' in resolution: width, height = [int(x) for x in resolution.split('x')]
     else: width, height = native_display()
     fullscreen = '--fullscreen' in sys.argv or setting('StartFullscreen', '0') == '1'
-    options = ['--memory', setting('MemoryMiB', '4096'), '--cpus', setting('CPUs', '6')]
+    # Android 16 with Google's services swaps hard in 4 GB; 8 GB on Macs that have the room
+    big = int(subprocess.check_output(['/usr/sbin/sysctl', '-n', 'hw.memsize'], text=True)) >= 24 << 30
+    options = ['--memory', setting('MemoryMiB', '8192' if big else '4096'), '--cpus', setting('CPUs', '6')]
     if setting('Networking', '1') == '0': options.append('--offline')
     if setting('Audio', '1') == '0': options.append('--no-audio')
     if setting('Bluetooth', '1') == '0': options.append('--no-bluetooth')

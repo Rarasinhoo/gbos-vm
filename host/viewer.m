@@ -266,7 +266,10 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  // A VM runs on while its window is in the background, and the guest waits on this app for every
  // frame: keep App Nap from throttling us to a few timer wakeups a second (sleep stays allowed).
  self.activity=[[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep|NSActivityLatencyCritical reason:@"Running the Googlebook VM"];
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Bluetooth":@YES,@"AndroidTouchpad":@NO,@"RefreshCap":@120}];
+ // Android 16 with Google's services swaps hard in 4 GB (laggy screens, CPU spent compressing
+ // memory); give it 8 GB on Macs that have the room.
+ NSNumber *memory=NSProcessInfo.processInfo.physicalMemory>=24ULL<<30?@8192:@4096;
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Bluetooth":@YES,@"AndroidTouchpad":@NO,@"RefreshCap":@120}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);

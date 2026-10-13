@@ -39,6 +39,10 @@ handle() {
       for f in /product/media/audio/ringtones/*.ogg /system/media/audio/ringtones/*.ogg /product/media/audio/alarms/*.ogg /system/media/audio/alarms/*.ogg; do [ -f "$f" ] && break; done
       echo "VM_CONTROL play $f"
       timeout 10 am start --user "$u" -a android.intent.action.VIEW -t audio/ogg -d "file://$f" 2>&1 | head -6 | sed 's/^/VM_CONTROL play /' ;;
+    VM_TOP)
+      # What is using the guest's CPUs: one snapshot of the busiest processes and threads
+      timeout 10 top -b -n 1 -m 20 2>&1 | head -30 | cut -c1-150 | sed 's/^/VM_CONTROL top /'
+      timeout 10 top -b -H -n 1 -m 12 2>&1 | tail -n +5 | head -16 | cut -c1-150 | sed 's/^/VM_CONTROL thread /' ;;
     VM_STATUS)
       echo "VM_CONTROL boot=$(getprop sys.boot_completed) user=$(timeout 5 am get-current-user) size=$(timeout 5 wm size | tr '\n' ' ') density=$(timeout 5 wm density | tr '\n' ' ')"
       timeout 5 cat /proc/asound/cards 2>&1 | sed 's/^/VM_CONTROL asound /'
