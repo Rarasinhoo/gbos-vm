@@ -50,7 +50,7 @@ def main():
     density = 320  # macOS's own 2x, unless the viewer says otherwise for this screen
     try:  # pace the guest to the main screen (see guest_refresh in run_vm.py), and size its UI like macOS
         hz, d = subprocess.check_output([str(viewer_app), '--screen', str(width)], text=True, timeout=10).split()
-        density = int(d); options += ['--host-refresh', str(float(hz)), '--refresh-cap', setting('RefreshCap', '75')]
+        density = int(d); options += ['--host-refresh', str(float(hz)), '--refresh-cap', setting('RefreshCap', '120')]
     except (subprocess.SubprocessError, OSError, ValueError):
         pass
     name = 'desktop-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S')

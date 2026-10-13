@@ -257,7 +257,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  // A VM runs on while its window is in the background, and the guest waits on this app for every
  // frame: keep App Nap from throttling us to a few timer wakeups a second (sleep stays allowed).
  self.activity=[[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep|NSActivityLatencyCritical reason:@"Running the Googlebook VM"];
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Bluetooth":@YES,@"AndroidTouchpad":@NO,@"RefreshCap":@75}];
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Bluetooth":@YES,@"AndroidTouchpad":@NO,@"RefreshCap":@120}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
@@ -481,7 +481,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
    @[[NSGridCell emptyContentView],[self checkbox:@"AndroidTouchpad" title:@"Trackpad as an Android touchpad (experimental: gestures, can stutter)"]],
    @[[NSGridCell emptyContentView],note],
    @[[NSGridCell emptyContentView],[NSButton buttonWithTitle:@"Restart VM Now" target:self action:@selector(restartVM:)]],
-   @[label(@"Refresh rate:"),[self popup:@"RefreshCap" titles:@[@"Smooth pointer (60 Hz on a 120 Hz screen)",@"Screen's full rate, up to 120 Hz (pointer can stutter)"] values:@[@75,@120]]],
+   @[label(@"Refresh rate:"),[self popup:@"RefreshCap" titles:@[@"Screen's full rate, up to 120 Hz",@"Lighter, up to 75 Hz (60 on a 120 Hz screen)"] values:@[@120,@75]]],
    @[label(@"Resolution:"),[self popup:@"Resolution" titles:@[@"Match this Mac's display",@"1920 × 1200",@"2560 × 1600",@"3024 × 1890",@"3456 × 2160"] values:@[@"native",@"1920x1200",@"2560x1600",@"3024x1890",@"3456x2160"]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"StartFullscreen" title:@"Start in full screen"]],
    @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],

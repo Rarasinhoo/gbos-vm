@@ -97,13 +97,13 @@ def qemu_at_refresh(host, hz):
         return None
 
 
-def guest_refresh(host_hz, any_rate=True, cap=75):
+def guest_refresh(host_hz, any_rate=True, cap=120):
     """The guest refresh rate that paces best on a host_hz screen. With a QEMU we can patch
-    (any_rate), that is the largest whole fraction of the screen's rate up to cap (120 -> 60,
-    144 -> 72), so every frame stays up for the same number of refreshes; a screen up to 90 Hz
-    that would drop below 50 that way (85 -> 42.5) keeps its own rate instead. The cap is there
-    because QEMU does the guest's GL work on the same thread that delivers input: at 120 Hz the
-    mouse reached the guest in clumps (half the frames without a pointer update), at 60 Hz evenly.
+    (any_rate), that is the largest whole fraction of the screen's rate up to cap (with the default
+    120: 120 -> 120, 144 -> 72; with 75: 120 -> 60), so every frame stays up for the same number of
+    refreshes; a screen up to 90 Hz that would drop below 50 that way (85 -> 42.5 under a 75 cap)
+    keeps its own rate instead. A lower cap lightens the guest: at native resolution and 120 Hz,
+    2-4% of frames miss their deadline while scrolling, against about 0.5% at 60-85 Hz.
     Otherwise only 60 Hz (no EDID: the guest driver's own 59.95 Hz mode) and 75 Hz (QEMU's EDID)
     are on offer: a screen that is a whole multiple of one shows every frame for the same time,
     and failing that the rate with fewer uneven frames per second (the beat against the nearest
@@ -126,7 +126,7 @@ def main():
     a.add_argument('--cpus', type=int, default=6)
     a.add_argument('--host-refresh', type=float, help="the Mac screen's refresh rate; picks the guest rate that paces best on it")
     a.add_argument('--refresh', type=float, help='guest refresh rate in Hz (overrides --host-refresh; default 75)')
-    a.add_argument('--refresh-cap', type=float, default=75, help='highest guest rate --host-refresh may pick (default 75)')
+    a.add_argument('--refresh-cap', type=float, default=120, help='highest guest rate --host-refresh may pick (default 120)')
     a.add_argument('--image', help='image folder (default WORK/image)')
     args = a.parse_args()
     work = Path(args.work).resolve()
