@@ -1,0 +1,16 @@
+diff --git a/host/virtio_gpu_frontend.cpp b/host/virtio_gpu_frontend.cpp
+index 3b5eaaf1..015f2f4f 100644
+--- a/host/virtio_gpu_frontend.cpp
++++ b/host/virtio_gpu_frontend.cpp
+@@ -180,6 +180,11 @@ int VirtioGpuFrontend::createContext(VirtioGpuCtxId contextId, uint32_t nlen, co
+ 
+     GFXSTREAM_DEBUG("ctxid: %u len: %u name: %s", contextId, nlen, contextName.c_str());
+ 
++    // The guest kernel hands a context id out again as soon as a process lets it go, while the
++    // previous owner's cleanup still runs on the cleanup thread, keyed by that same id. Left
++    // alone, that cleanup tears down the new process's Vulkan objects. Finish it first.
++    mRenderer->waitForProcessCleanup();
++
+     auto contextOpt = VirtioGpuContext::Create(mRenderer, contextId, contextName, contextInit);
+     if (!contextOpt) {
+         GFXSTREAM_ERROR("Failed to create context %u.", contextId);

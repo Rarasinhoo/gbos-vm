@@ -15,6 +15,12 @@ timeout 25 /vendor/bin/vm-vulkan-probe --ahb
 echo VM_AHB_PROBE_EXIT=$?
 timeout 25 /vendor/bin/vm-vulkan-probe --ahb-render
 echo VM_AHB_RENDER_PROBE_EXIT=$?
+timeout 25 /vendor/bin/vm-vulkan-probe --ahb-render-bgra
+echo VM_AHB_BGRA_PROBE_EXIT=$?
+# ANGLE, EGL and buffer errors too (GLES runs on ANGLE with --gfxstream images)
+logcat -d -b all -t 3000 -v threadtime | grep -E -i 'angle|libEGL|gfxstream|AHardwareBuffer|GraphicBuffer|Skia|RenderEngine|minigbm|gralloc' | grep -E ' [EWF] ' | tail -60
+# The 60 log lines (any process, info and up) before SurfaceFlinger's first fatal error
+logcat -d -b all -v threadtime | grep -v -E ' [VD] ' | awk '/F SurfaceFlinger: Failed to create a valid texture/ {for (i = NR - 60; i < NR; i++) if (i > 0) print b[i % 60]; exit} {b[NR % 60] = $0}' | sed 's/^/VM_SF /'
 logcat -d -b all -t 1500 -v threadtime | grep -E -i 'MESA-VIRTIO|venus|vulkan|avc: denied' | tail -100
 dumpsys -t 5 SurfaceFlinger | grep -E 'GLES|EGL|Vulkan|RenderEngine|Composition'
 echo VM_VULKAN_STARTUP_END

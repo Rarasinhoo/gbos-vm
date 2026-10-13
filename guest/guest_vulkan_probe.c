@@ -17,7 +17,9 @@
 #include <GLES2/gl2ext.h>
 #define CHECK(call) do { VkResult r=(call); printf("VM_VULKAN %s = %d\n",#call,r); if(r!=VK_SUCCESS)return 1; } while(0)
 int main(int argc, char **argv) {
- int test_render=argc>1 && !strcmp(argv[1],"--ahb-render");
+ // --ahb-render-bgra: the same with a BGRA buffer (HAL format 5), what SurfaceFlinger composites
+ int test_bgra=argc>1 && !strcmp(argv[1],"--ahb-render-bgra");
+ int test_render=test_bgra || (argc>1 && !strcmp(argv[1],"--ahb-render"));
  int test_ahb=test_render || (argc>1 && !strcmp(argv[1],"--ahb"));
  setbuf(stdout,NULL);
  puts("VM_VULKAN_BEGIN");
@@ -80,7 +82,7 @@ int main(int argc, char **argv) {
  if(test_ahb){dci.enabledExtensionCount=test_render?2:1;dci.ppEnabledExtensionNames=ahb_ext;}
  VkDevice dev;CHECK(vkCreateDevice(phys,&dci,NULL,&dev));
  if(test_ahb){
-   AHardwareBuffer_Desc desc={.width=64,.height=64,.layers=1,.format=AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,.usage=AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE|AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT};
+   AHardwareBuffer_Desc desc={.width=64,.height=64,.layers=1,.format=test_bgra?5:AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,.usage=AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE|AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT};
    AHardwareBuffer *ahb=NULL;int rc=AHardwareBuffer_allocate(&desc,&ahb);
    printf("VM_AHB allocate_rc=%d\n",rc);if(rc||!ahb)return 6;
    uint64_t id=0;AHardwareBuffer_getId(ahb,&id);AHardwareBuffer_describe(ahb,&desc);

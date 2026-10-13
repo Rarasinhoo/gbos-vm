@@ -26,6 +26,7 @@ ln -s "$WORK/cuttlefish/graphics/cf-composer" "$WS/artifacts/graphics-port-revie
 ln -s "$WORK/cuttlefish/modules" "$WS/artifacts/cuttlefish-arm17/modules"
 ln -s "$WORK/cuttlefish/audio-config" "$WS/artifacts/cuttlefish-audio-config"
 ln -s "$WORK/cuttlefish/bluetooth" "$WS/artifacts/cuttlefish-bluetooth"
+ln -s "$WORK/cuttlefish/gfxstream" "$WS/artifacts/cuttlefish-gfxstream"
 ln -s "$(brew --prefix erofs-utils)/bin" "$WS/experiments/erofs-utils/1.9.4/bin"
 ln -s "$(brew --prefix e2fsprogs)/sbin" "$WS/experiments/ext4-tools/e2fsprogs/1.47.4/sbin"
 export GOOGLEBOOK_GUEST_DIR="$GUEST" GOOGLEBOOK_TOOLS_DIR="$TOOLS"

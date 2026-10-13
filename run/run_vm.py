@@ -13,7 +13,7 @@ Bluetooth: if the Android emulator's netsimd is installed (SDK "emulator" packag
 GBOS_NETSIMD), it is started as a virtual Bluetooth controller and Android is told it has
 Bluetooth. Otherwise, or with --no-bluetooth, the guest boots with no Bluetooth at all.
 """
-import argparse, atexit, fcntl, json, math, os, secrets, signal, socket, subprocess, sys
+import argparse, atexit, fcntl, json, math, os, secrets, shutil, signal, socket, subprocess, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -60,7 +60,7 @@ def start_netsimd(binary, out):
     return proc, port
 
 
-def qemu_at_refresh(host, hz):
+def qemu_at_refresh(base, hz):
     """A copy of QEMU's library whose display description (EDID) says hz instead of 75 Hz, or
     None if this QEMU build doesn't look like the one we know how to change.
 
@@ -69,14 +69,17 @@ def qemu_at_refresh(host, hz):
     75000, right before the CSEL that picks it; we rewrite their immediates. The copy sits beside
     the original (it finds the patched renderer via @loader_path), is ad-hoc signed like the
     original, and is kept for the next boot at the same rate."""
-    base = host / 'qemu-aarch64-softmmu'
     mhz = round(hz * 1000)
     if mhz == 75000: return base
-    out = host / f'qemu-aarch64-softmmu-{mhz}mhz'
+    out = base.with_name(f'{base.name}-{mhz}mhz')
     if out.exists() and out.stat().st_mtime >= base.stat().st_mtime: return out
     tmp = out.with_suffix('.tmp')
     try:
-        subprocess.run(['/usr/bin/lipo', '-thin', 'arm64', str(base), '-output', str(tmp)], check=True, capture_output=True)
+        if b'arm64' in subprocess.run(['/usr/bin/lipo', '-archs', str(base)], capture_output=True).stdout and \
+           subprocess.run(['/usr/bin/lipo', '-info', str(base)], capture_output=True, text=True).stdout.startswith('Architectures in the fat'):
+            subprocess.run(['/usr/bin/lipo', '-thin', 'arm64', str(base), '-output', str(tmp)], check=True, capture_output=True)
+        else:  # already arm64 only (our own build)
+            shutil.copyfile(base, tmp)
         code = bytearray(tmp.read_bytes())
         word = lambda o: int.from_bytes(code[o:o + 4], 'little')
         sites = [o for o in range(0, len(code) - 16, 4)
@@ -128,6 +131,8 @@ def main():
     a.add_argument('--refresh', type=float, help='guest refresh rate in Hz (overrides --host-refresh; default 75)')
     a.add_argument('--refresh-cap', type=float, default=120, help='highest guest rate --host-refresh may pick (default 120)')
     a.add_argument('--image', help='image folder (default WORK/image)')
+    a.add_argument('--gpu', choices=('virgl', 'gfxstream'), default='virgl',
+                   help='virgl (default), or the experimental gfxstream stack (build-gfxstream.sh, a --gfxstream image)')
     args = a.parse_args()
     work = Path(args.work).resolve()
     assert args.name.replace('-', '').replace('_', '').isalnum() and 10 <= args.seconds <= 86400
@@ -138,10 +143,13 @@ def main():
         if not p.exists(): sys.exit(f'missing: {p}')
     width, height = args.display.split('x')
     refresh = args.refresh or (guest_refresh(args.host_refresh, cap=args.refresh_cap) if args.host_refresh else 75)
-    qemu, edid = qemu_at_refresh(host, refresh), True
+    # gfxstream needs our own QEMU build (UTM's has no rutabaga); virgl uses UTM's, repointed.
+    base = work / 'build/qemu-gfx/libqemu-aarch64-softmmu.dylib' if args.gpu == 'gfxstream' else host / 'qemu-aarch64-softmmu'
+    if not base.exists(): sys.exit(f'missing: {base} (run build-gfxstream.sh)')
+    qemu, edid = qemu_at_refresh(base, refresh), True
     if qemu is None:  # an unknown QEMU build: fall back to the two rates it offers unmodified
         refresh = guest_refresh(args.host_refresh or refresh, any_rate=False)
-        qemu, edid = host / 'qemu-aarch64-softmmu', refresh != 60
+        qemu, edid = base, refresh != 60
         if not edid: refresh = 59.95
     print(f'guest refresh: {refresh:g} Hz' + (f' (Mac screen {args.host_refresh:g} Hz)' if args.host_refresh else ''), flush=True)
     (work / 'logs').mkdir(exist_ok=True)
@@ -154,6 +162,7 @@ def main():
     (out / 'token').write_text(token); os.chmod(out / 'token', 0o600)
     (out / 'refresh').write_text(f'{refresh:g}\n')  # the viewer locks its presentation to it
 
+    gpu = 'virtio-gpu-gl-pci' if args.gpu == 'virgl' else 'virtio-gpu-rutabaga-pci'
     netsim, cmdline = None, CMDLINE + ' androidboot.gbos_token=' + token
     netsimd = None if args.no_bluetooth else find_netsimd()
     if netsimd:
@@ -162,9 +171,10 @@ def main():
     print('bluetooth:', f'virtual controller ({netsimd})' if netsimd else 'none', flush=True)
 
     cmd = [str(host / 'qemu-interop'), '-L', str(utm / 'Contents/Resources/qemu'), '-nodefaults', '-vga', 'none',
-           '-nic', 'none', '-device', 'virtio-gpu-gl-pci,hostmem=8G,blob=true,venus=true',
-           '-global', f'virtio-gpu-gl-pci.xres={width}', '-global', f'virtio-gpu-gl-pci.yres={height}',
-           *([] if edid else ['-global', 'virtio-gpu-gl-pci.edid=off']),
+           '-nic', 'none', '-device', gpu + (',hostmem=8G,blob=true,venus=true' if args.gpu == 'virgl' else
+                                             ',hostmem=8G,gfxstream-vulkan=on' + os.environ.get('GBOS_GFXSTREAM_DEVICE', '')),
+           '-global', f'{gpu}.xres={width}', '-global', f'{gpu}.yres={height}',
+           *([] if edid else ['-global', f'{gpu}.edid=off']),
            '-cpu', 'host', '-smp', f'cpus={args.cpus},sockets=1,cores={args.cpus},threads=1',
            '-machine', 'virt,gic-version=3,highmem=on,highmem-ecam=off', '-accel', 'hvf,ipa-granule-size=0x1000',
            '-m', str(args.memory), '-audio', 'none',
@@ -191,7 +201,14 @@ def main():
                DYLD_FRAMEWORK_PATH=str(utm / 'Contents/Frameworks'),
                RENDER_SERVER_EXEC_PATH=str(host / 'virgl_render_server'),
                VK_DRIVER_FILES=str(utm / 'Contents/Resources/vulkan/icd.d/MoltenVK_icd.json'),
-               ANGLE_DEFAULT_PLATFORM='metal', XDG_RUNTIME_DIR=str(out), TMPDIR=str(out))
+               ANGLE_DEFAULT_PLATFORM='metal', XDG_RUNTIME_DIR=str(out), TMPDIR=str(out),
+               MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS='0',  # gfxstream on MoltenVK wants this
+               # HVF cannot map Metal's own memory into the guest: give gfxstream ordinary memory
+               # for everything the guest maps, imported into Vulkan (VK_EXT_external_memory_host).
+               # Android's UI renderer insists on two graphics queues; MoltenVK runs with one, so
+               # gfxstream offers a second that feeds the same Metal queue.
+               GFXSTREAM_RENDERER_FEATURES=os.environ.get('GFXSTREAM_RENDERER_FEATURES',
+                                                          'VulkanAllocateHostMemory:enabled,VulkanVirtualQueue:enabled'))
     env.pop('APP_SANDBOX_GROUP_ID', None)
     (out / 'command.json').write_text(json.dumps({'command': cmd, 'seconds': args.seconds}, indent=2))
     with (out / 'host.log').open('wb') as log:

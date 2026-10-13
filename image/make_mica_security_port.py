@@ -189,6 +189,24 @@ on post-fs-data
     setprop log.tag.InputDispatcherInboundEvent DEBUG
     start vm-perf-test
 ''','vendor_configs_file')
+if '--gfxstream' in sys.argv:
+ # Experimental: gfxstream graphics (the device is virtio-gpu-rutabaga, see build-gfxstream.sh).
+ # GLES is Android's own ANGLE on gfxstream's Vulkan driver, which reaches the Mac's GPU through
+ # MoltenVK; buffers stay with minigbm, which gfxstream's driver reads as such.
+ assert '--venus' in sys.argv
+ # The driver must speak the same protocol revision as the Mac's renderer: build-gfxstream.sh
+ # builds it from the matching Mesa; Cuttlefish's prebuilt one is the fallback.
+ if GUEST and (GUEST/'vulkan.gfxstream.so').exists():
+  add('lib64/hw/vulkan.ranchu.so',(GUEST/'vulkan.gfxstream.so').read_bytes(),'same_process_hal_file')
+ else:
+  G=R/'artifacts/cuttlefish-gfxstream'
+  add('lib64/hw/vulkan.ranchu.so',(G/'vulkan.ranchu.so').read_bytes(),'same_process_hal_file')
+  for n in ['libOpenglCodecCommon.so','libzstd.so']: add('lib64/'+n,(G/n).read_bytes(),'same_process_hal_file')
+ b,label,mode=files['build.prop']
+ for old,new in [(b'ro.hardware.egl=virgl\n',b'ro.hardware.egl=angle\n'),(b'ro.hardware.vulkan=virtio\n',b'ro.hardware.vulkan=ranchu\n')]:
+  assert old in b,old; b=b.replace(old,new)
+ b+=b'# gfxstream: its Vulkan driver reads minigbm buffers\nro.hardware.gralloc=minigbm\n'
+ files['build.prop']=(b,label,mode)
 if '--chrome-diagnostic' in sys.argv:
  assert '--venus' in sys.argv
  add('bin/vm-chrome-diagnostic.sh',(R/'scripts/guest_chrome_diagnostic.sh').read_bytes(),'vendor_shell_exec',0o755)

@@ -1,0 +1,48 @@
+diff --git a/src/gfxstream/guest/connection-manager/meson.build b/src/gfxstream/guest/connection-manager/meson.build
+index df2a49b..cc22a50 100644
+--- a/src/gfxstream/guest/connection-manager/meson.build
++++ b/src/gfxstream/guest/connection-manager/meson.build
+@@ -9,11 +9,7 @@ files_libconnection_manager = files(
+     'VirtioGpuPipeStream.cpp',
+ )
+ 
+-if with_platform_android
+-  files_libconnection_manager += files('QemuPipeStream.cpp')
+-else
+-  files_libconnection_manager += files('QemuPipeStreamStub.cpp')
+-endif
++files_libconnection_manager += files('QemuPipeStreamStub.cpp')
+ 
+ libconnection_manager = static_library(
+     'connection_manager',
+diff --git a/src/gfxstream/guest/meson.build b/src/gfxstream/guest/meson.build
+index c54f57b..95d5c64 100644
+--- a/src/gfxstream/guest/meson.build
++++ b/src/gfxstream/guest/meson.build
+@@ -49,9 +49,6 @@ if with_gfxstream_emulated_android
+     gfxstream_guest_args += '-DEND2END_TESTS'
+ endif
+ 
+-if with_platform_android
+-    gfxstream_guest_args += '-DGFXSTREAM_ENABLE_GUEST_GOLDFISH'
+-endif
+ 
+ #====================================#
+ #   Standard deps                    #
+diff --git a/src/gfxstream/guest/vulkan/meson.build b/src/gfxstream/guest/vulkan/meson.build
+index e38c96d..b0eb918 100644
+--- a/src/gfxstream/guest/vulkan/meson.build
++++ b/src/gfxstream/guest/vulkan/meson.build
+@@ -1,11 +1,7 @@
+ # Copyright 2022 Android Open Source Project
+ # SPDX-License-Identifier: MIT
+ 
+-if with_platform_android
+-    dep_gfxstream_stubs = null_dep
+-else
+-    subdir('stubs')
+-endif
++subdir('stubs')
+ 
+ gfxstream_deps += dep_gfxstream_stubs
+ 

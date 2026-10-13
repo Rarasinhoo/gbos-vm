@@ -1,0 +1,31 @@
+--- a/ui/console-gl.c	2026-10-13 18:25:51
++++ b/ui/console-gl.c	2026-10-13 18:25:51
+@@ -64,6 +64,12 @@
+         surface->glformat = GL_RGBA;
+         surface->gltype = GL_UNSIGNED_BYTE;
+         break;
++    case PIXMAN_x8b8g8r8:
++    case PIXMAN_a8b8g8r8:
++        /* R, G, B, A in memory: what Android scans out through virtio-gpu-rutabaga */
++        surface->glformat = GL_RGBA;
++        surface->gltype = GL_UNSIGNED_BYTE;
++        break;
+     case PIXMAN_r5g6b5:
+         surface->glformat = GL_RGB;
+         surface->gltype = GL_UNSIGNED_SHORT_5_6_5;
+--- a/hw/display/virtio-gpu-rutabaga.c	2026-10-13 18:29:42
++++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-13 18:29:42
+@@ -1031,6 +1031,13 @@
+         }
+     }
+ 
++    /*
++     * gfxstream renderer features ("Name:enabled,Name:disabled"), which this
++     * device has no properties for. On macOS, VulkanAllocateHostMemory is
++     * needed: Metal's own memory cannot be mapped into the guest by HVF.
++     */
++    builder.renderer_features = getenv("GFXSTREAM_RENDERER_FEATURES");
++
+     result = rutabaga_init(&builder, &vr->rutabaga);
+     if (result) {
+         error_setg_errno(errp, -result, "Failed to init rutabaga");
