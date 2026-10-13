@@ -58,10 +58,14 @@ say "QEMU (UTM's 10.0.12) with the gfxstream device"
 for f in libslirp spice-protocol spice-server libusb usbredir; do
   brew list --formula "$f" >/dev/null 2>&1 || die "missing $f: brew install libslirp spice-protocol spice-server libusb usbredir"
 done
-[ -d "$WORK/src/qemu-10.0.12-utm" ] || { fetch "$QEMU_UTM_URL" "$WORK/downloads/qemu-10.0.12-utm.tar.xz" "$QEMU_UTM_SHA256"; tar -xf "$WORK/downloads/qemu-10.0.12-utm.tar.xz" -C "$WORK/src"; }
-# Our changes on top (applied once; a dry run fails when they are already in)
-if patch -d "$WORK/src/qemu-10.0.12-utm" -p1 -N --dry-run --silent <"$ROOT/patches/qemu-gfxstream.patch" >/dev/null 2>&1; then
-  patch -d "$WORK/src/qemu-10.0.12-utm" -p1 -N --silent <"$ROOT/patches/qemu-gfxstream.patch"
+# A fresh tree with our changes on top, whenever those change (zero-copy display, RGBA
+# consoles, renderer features from the environment)
+QSRC="$WORK/src/qemu-10.0.12-utm"
+if ! cmp -s "$ROOT/patches/qemu-gfxstream.patch" "$QSRC/.gbos-patch"; then
+  fetch "$QEMU_UTM_URL" "$WORK/downloads/qemu-10.0.12-utm.tar.xz" "$QEMU_UTM_SHA256"
+  rm -rf "$QSRC"; tar -xf "$WORK/downloads/qemu-10.0.12-utm.tar.xz" -C "$WORK/src"
+  patch -d "$QSRC" -p1 --silent <"$ROOT/patches/qemu-gfxstream.patch" || die "QEMU patch does not apply"
+  cp "$ROOT/patches/qemu-gfxstream.patch" "$QSRC/.gbos-patch"
 fi
 mkdir -p "$WORK/build/qemu-gfx"
 # apple-gfx (macOS guests) uses APIs the macOS 27 SDK removed, and GTK clashes with the library
@@ -69,16 +73,27 @@ mkdir -p "$WORK/build/qemu-gfx"
 # don't generate: GL_TEXTURE_RECTANGLE_ANGLE is 0x84F5, the ARB rectangle target.
 ( cd "$WORK/build/qemu-gfx" && \
   PKG_CONFIG_PATH="$R/pkgconfig:$WORK/pkgconfig:$WORK/build/virglrenderer/meson-uninstalled:$(brew --prefix)/lib/pkgconfig" \
-  "$WORK/src/qemu-10.0.12-utm/configure" --target-list=aarch64-softmmu --enable-shared-lib --disable-cocoa --disable-sdl \
+  "$QSRC/configure" --target-list=aarch64-softmmu --enable-shared-lib --disable-cocoa --disable-sdl \
     --disable-gtk --disable-vte --disable-docs --disable-werror --disable-pvg --extra-cflags=-DGL_TEXTURE_RECTANGLE_ANGLE=0x84F5 \
     --enable-hvf --enable-spice --enable-opengl --enable-virglrenderer --enable-rutabaga-gfx --enable-slirp \
     --enable-libusb --enable-usb-redir --enable-coreaudio && \
   ninja -j "$JOBS" libqemu-aarch64-softmmu.dylib ) >"$WORK/build/qemu-gfx.log" 2>&1 \
   || { grep -E 'FAILED|error:' "$WORK/build/qemu-gfx.log" | head; die "QEMU build failed"; }
 
-# gfxstream looks for the Vulkan loader next to the launcher; UTM ships one (and MoltenVK).
+# gfxstream looks for the Vulkan loader and MoltenVK's driver manifest next to the launcher;
+# UTM ships both libraries.
 mkdir -p "$WORK/host/lib64/vulkan"
 ln -sf "$UTM_FW/vulkan.1.framework/Versions/A/vulkan.1" "$WORK/host/lib64/vulkan/libvulkan.dylib"
+cat > "$WORK/host/lib64/vulkan/MoltenVK_icd.json" <<JSON
+{
+    "file_format_version" : "1.0.0",
+    "ICD": {
+        "library_path": "$UTM_FW/MoltenVK.framework/Versions/Current/MoltenVK",
+        "api_version" : "1.4.0",
+        "is_portability_driver" : true
+    }
+}
+JSON
 say "gfxstream guest Vulkan driver"
 checkout "$MESA_GFX_REPO" "$MESA_GFX_COMMIT" "$WORK/src/mesa3d-gfxstream"
 # Built outside AOSP: no goldfish pipe or render-control encoder (virtio-gpu only)

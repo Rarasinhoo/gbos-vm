@@ -1,3 +1,52 @@
+diff --git a/host/frame_buffer.cpp b/host/frame_buffer.cpp
+index 473fcea7..c2e9d6d8 100644
+--- a/host/frame_buffer.cpp
++++ b/host/frame_buffer.cpp
+@@ -4854,6 +4854,14 @@ bool FrameBuffer::hasEmulationGl() const { return mImpl->hasEmulationGl(); }
+ 
+ bool FrameBuffer::hasEmulationVk() const { return mImpl->hasEmulationVk(); }
+ 
++#ifdef __APPLE__
++void* FrameBuffer::getColorBufferMetalTexture(HandleType colorBufferHandle) {
++    return mImpl->hasEmulationVk()
++               ? mImpl->getEmulationVk().getColorBufferMetalTexture(colorBufferHandle)
++               : nullptr;
++}
++#endif
++
+ bool FrameBuffer::setColorBufferVulkanMode(HandleType colorBufferHandle, uint32_t mode) {
+     return mImpl->setColorBufferVulkanMode(colorBufferHandle, mode);
+ }
+diff --git a/host/frame_buffer.h b/host/frame_buffer.h
+index adb25ced..7da483b2 100644
+--- a/host/frame_buffer.h
++++ b/host/frame_buffer.h
+@@ -436,6 +436,10 @@ class FrameBuffer : public gfxstream::base::EventNotificationSupport<FrameBuffer
+ 
+     bool hasEmulationGl() const;
+     bool hasEmulationVk() const;
++#ifdef __APPLE__
++    // The id<MTLTexture> holding a ColorBuffer's pixels, for zero-copy display; null if none.
++    void* getColorBufferMetalTexture(HandleType colorBufferHandle);
++#endif
+ 
+     bool setColorBufferVulkanMode(HandleType colorBufferHandle, uint32_t mode);
+     int32_t mapGpaToBufferHandle(uint32_t bufferHandle, uint64_t gpa, uint64_t size = 0);
+diff --git a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
+index 5f5eae0a..a81fab09 100644
+--- a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
++++ b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
+@@ -61,6 +61,10 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
+ 
+ VG_EXPORT void stream_renderer_flush(uint32_t res_handle);
+ 
++// macOS: the id<MTLTexture> holding a resource's pixels, valid while the resource lives, so a
++// display can show it without reading it back. Returns 0 and sets *texture, or -EINVAL.
++VG_EXPORT int stream_renderer_resource_get_metal_texture(uint32_t res_handle, void** texture);
++
+ VG_EXPORT void* stream_renderer_platform_create_shared_egl_context(void);
+ VG_EXPORT int stream_renderer_platform_destroy_shared_egl_context(void*);
+ 
 diff --git a/host/virtio_gpu_frontend.cpp b/host/virtio_gpu_frontend.cpp
 index 3b5eaaf1..015f2f4f 100644
 --- a/host/virtio_gpu_frontend.cpp
@@ -14,3 +63,79 @@ index 3b5eaaf1..015f2f4f 100644
      auto contextOpt = VirtioGpuContext::Create(mRenderer, contextId, contextName, contextInit);
      if (!contextOpt) {
          GFXSTREAM_ERROR("Failed to create context %u.", contextId);
+diff --git a/host/virtio_gpu_gfxstream_renderer.cpp b/host/virtio_gpu_gfxstream_renderer.cpp
+index f974dad1..9c2bd992 100644
+--- a/host/virtio_gpu_gfxstream_renderer.cpp
++++ b/host/virtio_gpu_gfxstream_renderer.cpp
+@@ -443,6 +443,16 @@ VG_EXPORT int stream_renderer_resource_get_info(int res_handle,
+     return sFrontend()->getResourceInfo(res_handle, info);
+ }
+ 
++VG_EXPORT int stream_renderer_resource_get_metal_texture(uint32_t res_handle, void** texture) {
++#ifdef __APPLE__
++    *texture = FrameBuffer::getFB()->getColorBufferMetalTexture(res_handle);
++    return *texture ? 0 : -EINVAL;
++#else
++    *texture = nullptr;
++    return -EINVAL;
++#endif
++}
++
+ VG_EXPORT void stream_renderer_flush(uint32_t res_handle) {
+     GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY, "stream_renderer_flush()");
+ 
+diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
+index 50de4f4a..7b9670f5 100644
+--- a/host/vulkan/vk_common_operations.cpp
++++ b/host/vulkan/vk_common_operations.cpp
+@@ -2080,6 +2080,37 @@ MTLResource_id VkEmulation::getMtlResourceFromVkDeviceMemory(VulkanDispatch* vk,
+     }
+     return outputHandle;
+ }
++
++MTLResource_id VkEmulation::getColorBufferMetalTexture(uint32_t colorBufferHandle) {
++    std::lock_guard<std::mutex> lock(mMutex);
++    // The generated device dispatch leaves this extension's entry point out; ask the driver.
++    static PFN_vkExportMetalObjectsEXT exportMetalObjects =
++        mDvk->vkExportMetalObjectsEXT
++            ? mDvk->vkExportMetalObjectsEXT
++            : (PFN_vkExportMetalObjectsEXT)mIvk->vkGetDeviceProcAddr(mDevice,
++                                                                     "vkExportMetalObjectsEXT");
++    auto* info = gfxstream::base::find(mColorBuffers, colorBufferHandle);
++    if (!info || info->image == VK_NULL_HANDLE || !exportMetalObjects) {
++        GFXSTREAM_WARNING("No Metal texture for ColorBuffer %u (known %d, export %d)",
++                          colorBufferHandle, info != nullptr, exportMetalObjects != nullptr);
++        return nullptr;
++    }
++    VkExportMetalTextureInfoEXT texture = {
++        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT,
++        .image = info->image,
++        .plane = VK_IMAGE_ASPECT_PLANE_0_BIT,
++    };
++    VkExportMetalObjectsInfoEXT objects = {
++        .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT,
++        .pNext = &texture,
++    };
++    exportMetalObjects(mDevice, &objects);
++    if (!texture.mtlTexture) {
++        GFXSTREAM_WARNING("ColorBuffer %u: Vulkan driver exported no Metal texture",
++                          colorBufferHandle);
++    }
++    return texture.mtlTexture;
++}
+ #endif
+ 
+ #ifdef __ANDROID__
+diff --git a/host/vulkan/vk_common_operations.h b/host/vulkan/vk_common_operations.h
+index 6b60ac1a..c0614212 100644
+--- a/host/vulkan/vk_common_operations.h
++++ b/host/vulkan/vk_common_operations.h
+@@ -458,6 +458,8 @@ class VkEmulation {
+ #ifdef __APPLE__
+     MTLResource_id getBufferMetalMemoryHandle(uint32_t bufferHandle);
+     MTLResource_id getMtlResourceFromVkDeviceMemory(VulkanDispatch* vk, VkDeviceMemory memory);
++    // The id<MTLTexture> behind a ColorBuffer's image (VK_EXT_metal_objects), or null.
++    MTLResource_id getColorBufferMetalTexture(uint32_t colorBufferHandle);
+ #endif
+ 
+     bool readBufferToBytes(uint32_t bufferHandle, uint64_t offset, uint64_t size, void* outBytes);

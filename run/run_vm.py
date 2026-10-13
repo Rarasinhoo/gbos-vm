@@ -202,13 +202,15 @@ def main():
                RENDER_SERVER_EXEC_PATH=str(host / 'virgl_render_server'),
                VK_DRIVER_FILES=str(utm / 'Contents/Resources/vulkan/icd.d/MoltenVK_icd.json'),
                ANGLE_DEFAULT_PLATFORM='metal', XDG_RUNTIME_DIR=str(out), TMPDIR=str(out),
-               MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS='0',  # gfxstream on MoltenVK wants this
                # HVF cannot map Metal's own memory into the guest: give gfxstream ordinary memory
                # for everything the guest maps, imported into Vulkan (VK_EXT_external_memory_host).
                # Android's UI renderer insists on two graphics queues; MoltenVK runs with one, so
                # gfxstream offers a second that feeds the same Metal queue.
                GFXSTREAM_RENDERER_FEATURES=os.environ.get('GFXSTREAM_RENDERER_FEATURES',
-                                                          'VulkanAllocateHostMemory:enabled,VulkanVirtualQueue:enabled'))
+                                                          'VulkanAllocateHostMemory:enabled,VulkanVirtualQueue:enabled'),
+               # gfxstream's own MoltenVK set-up (its settings, and the Metal interop extensions
+               # the zero-copy display needs), with the manifest build-gfxstream.sh writes
+               ANDROID_EMU_VK_ICD='moltenvk')
     env.pop('APP_SANDBOX_GROUP_ID', None)
     (out / 'command.json').write_text(json.dumps({'command': cmd, 'seconds': args.seconds}, indent=2))
     with (out / 'host.log').open('wb') as log:

@@ -1,5 +1,116 @@
---- a/ui/console-gl.c	2026-10-13 18:25:51
-+++ b/ui/console-gl.c	2026-10-13 18:25:51
+diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
+--- a/hw/display/virtio-gpu-rutabaga.c	2026-07-27 00:50:42
++++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-13 19:40:34
+@@ -12,7 +12,33 @@
+ 
+ #include <glib/gmem.h>
+ #include <rutabaga_gfx/rutabaga_gfx_ffi.h>
++#ifdef CONFIG_METAL
++#include <dlfcn.h>
++#include "ui/console.h"
+ 
++/*
++ * Zero-copy display: gfxstream (loaded with rutabaga) can hand over the Metal texture behind a
++ * resource, and the SPICE display blits that straight into the surface the viewer shows, as it
++ * does for virglrenderer. Without it every flush reads the whole frame back to the CPU.
++ */
++typedef int (*get_metal_texture_fn)(uint32_t res_handle, void **texture);
++static bool metal_scanout[VIRTIO_GPU_MAX_SCANOUTS];
++
++static get_metal_texture_fn rutabaga_metal_texture_fn(void)
++{
++    static get_metal_texture_fn fn;
++    static bool looked;
++    if (!looked) {
++        looked = true;
++        if (!getenv("GBOS_GFXSTREAM_READBACK")) {
++            fn = (get_metal_texture_fn)dlsym(RTLD_DEFAULT,
++                                             "stream_renderer_resource_get_metal_texture");
++        }
++    }
++    return fn;
++}
++#endif
++
+ #define CHECK(condition, cmd)                                                 \
+     do {                                                                      \
+         if (!(condition)) {                                                   \
+@@ -268,6 +294,13 @@
+         return;
+     }
+ 
++#ifdef CONFIG_METAL
++    if (metal_scanout[i]) {
++        dpy_gl_update(scanout->con, rf.r.x, rf.r.y, rf.r.width, rf.r.height);
++        return;
++    }
++#endif
++
+     transfer.x = 0;
+     transfer.y = 0;
+     transfer.z = 0;
+@@ -306,6 +339,9 @@
+     scanout = &vb->scanout[ss.scanout_id];
+ 
+     if (ss.resource_id == 0) {
++#ifdef CONFIG_METAL
++        metal_scanout[ss.scanout_id] = false;
++#endif
+         dpy_gfx_replace_surface(scanout->con, NULL);
+         dpy_gl_scanout_disable(scanout->con);
+         return;
+@@ -314,6 +350,34 @@
+     res = virtio_gpu_find_resource(g, ss.resource_id);
+     CHECK(res, cmd);
+ 
++#ifdef CONFIG_METAL
++    {
++        get_metal_texture_fn get_texture = rutabaga_metal_texture_fn();
++        void *texture = NULL;
++        int rc = get_texture ? get_texture(ss.resource_id, &texture) : -1;
++        static int reported;
++        if (reported++ < 3) {
++            fprintf(stderr, "rutabaga: scanout %u resource %u metal texture %s (%d)\n",
++                    ss.scanout_id, ss.resource_id, texture ? "yes" : "no", rc);
++        }
++        if (rc == 0 && texture) {
++            ScanoutTextureNative native = {
++                .type = SCANOUT_TEXTURE_NATIVE_TYPE_METAL,
++                .handle = texture,
++            };
++            vb->enable = 1;
++            qemu_console_resize(scanout->con, ss.r.width, ss.r.height);
++            dpy_gl_scanout_texture(scanout->con, 0, false, res->width, res->height,
++                                   ss.r.x, ss.r.y, ss.r.width, ss.r.height, native, NULL);
++            scanout->resource_id = ss.resource_id;
++            res->scanout_bitmask = ss.scanout_id;
++            metal_scanout[ss.scanout_id] = true;
++            return;
++        }
++        metal_scanout[ss.scanout_id] = false;
++    }
++#endif
++
+     if (!res->image) {
+         pixman_format_code_t pformat;
+         pformat = virtio_gpu_get_pixman_format(res->format);
+@@ -1030,6 +1094,13 @@
+             builder.channels = &channels;
+         }
+     }
++
++    /*
++     * gfxstream renderer features ("Name:enabled,Name:disabled"), which this
++     * device has no properties for. On macOS, VulkanAllocateHostMemory is
++     * needed: Metal's own memory cannot be mapped into the guest by HVF.
++     */
++    builder.renderer_features = getenv("GFXSTREAM_RENDERER_FEATURES");
+ 
+     result = rutabaga_init(&builder, &vr->rutabaga);
+     if (result) {
+diff -ruN a/ui/console-gl.c b/ui/console-gl.c
+--- a/ui/console-gl.c	2026-07-27 00:50:43
++++ b/ui/console-gl.c	2026-10-13 19:40:34
 @@ -64,6 +64,12 @@
          surface->glformat = GL_RGBA;
          surface->gltype = GL_UNSIGNED_BYTE;
@@ -13,19 +124,109 @@
      case PIXMAN_r5g6b5:
          surface->glformat = GL_RGB;
          surface->gltype = GL_UNSIGNED_SHORT_5_6_5;
---- a/hw/display/virtio-gpu-rutabaga.c	2026-10-13 18:29:42
-+++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-13 18:29:42
-@@ -1031,6 +1031,13 @@
-         }
-     }
+diff -ruN a/ui/spice-display-metal.m b/ui/spice-display-metal.m
+--- a/ui/spice-display-metal.m	2026-07-27 00:50:43
++++ b/ui/spice-display-metal.m	2026-10-13 19:40:34
+@@ -18,6 +18,8 @@
+ @property (nonatomic, readonly) id<MTLCommandQueue> commandQueue;
+ @property (nonatomic, nullable, retain) id<MTLTexture> scanoutTexture;
+ @property (nonatomic, assign) CGRect scanoutRect;
++/* Copies with format conversion, for scanouts that aren't BGRA (gfxstream's are RGBA) */
++@property (nonatomic, nullable, retain) id<MTLComputePipelineState> convertPipeline;
  
-+    /*
-+     * gfxstream renderer features ("Name:enabled,Name:disabled"), which this
-+     * device has no properties for. On macOS, VulkanAllocateHostMemory is
-+     * needed: Metal's own memory cannot be mapped into the guest by HVF.
-+     */
-+    builder.renderer_features = getenv("GFXSTREAM_RENDERER_FEATURES");
+ - (instancetype)initWithDevice:(id<MTLDevice>)device
+                        surface:(IOSurfaceRef)surface
+@@ -41,7 +43,7 @@
+         textureDescriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+         textureDescriptor.width = width;
+         textureDescriptor.height = height;
+-        textureDescriptor.usage = MTLTextureUsageRenderTarget;
++        textureDescriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite;
+         _renderTarget = [device newTextureWithDescriptor:textureDescriptor iosurface:surface plane:0];
+         [textureDescriptor release];
+         if (!_renderTarget) {
+@@ -58,6 +60,7 @@
+ 
+ - (void)dealloc
+ {
++    [_convertPipeline release];
+     [_scanoutTexture release];
+     [_commandQueue release];
+     [_renderTarget release];
+@@ -84,12 +87,22 @@
+         }
+ 
+         id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
+-        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+         MTLOrigin origin = MTLOriginMake(self.scanoutRect.origin.x + rect.origin.x,
+                                          self.scanoutRect.origin.y + rect.origin.y,
+                                          0);
+         MTLSize size = MTLSizeMake(rect.size.width, rect.size.height, 1);
+ 
++        if (self.scanoutTexture.pixelFormat != self.renderTarget.pixelFormat &&
++            [self convertFrom:origin size:size to:rect.origin commandBuffer:commandBuffer]) {
++            [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
++                completion();
++            }];
++            [commandBuffer commit];
++            return;
++        }
 +
-     result = rutabaga_init(&builder, &vr->rutabaga);
-     if (result) {
-         error_setg_errno(errp, -result, "Failed to init rutabaga");
++        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
++
+         [blit copyFromTexture:self.scanoutTexture
+                   sourceSlice:0
+                   sourceLevel:0
+@@ -108,6 +121,52 @@
+ 
+         [commandBuffer commit];
+     }
++}
++
++/* A blit copies bytes as they are; a shader read and write converts between formats. */
++- (BOOL)convertFrom:(MTLOrigin)origin size:(MTLSize)size to:(CGPoint)dest
++      commandBuffer:(id<MTLCommandBuffer>)commandBuffer
++{
++    if (!self.convertPipeline) {
++        static NSString *const source =
++            @"#include <metal_stdlib>\n"
++             "using namespace metal;\n"
++             "kernel void convert(texture2d<half, access::read> src [[texture(0)]],\n"
++             "                    texture2d<half, access::write> dst [[texture(1)]],\n"
++             "                    constant uint4 &r [[buffer(0)]],\n"
++             "                    constant uint2 &dest [[buffer(1)]],\n"
++             "                    uint2 gid [[thread_position_in_grid]]) {\n"
++             "    if (gid.x >= r.z || gid.y >= r.w) return;\n"
++             "    dst.write(src.read(gid + r.xy), gid + dest);\n"
++             "}\n";
++        NSError *error = nil;
++        id<MTLDevice> device = self.renderTarget.device;
++        id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
++        id<MTLFunction> function = [library newFunctionWithName:@"convert"];
++        id<MTLComputePipelineState> pipeline =
++            function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
++        [function release];
++        [library release];
++        if (!pipeline) {
++            fprintf(stderr, "spice-display-metal: no conversion shader: %s\n",
++                    error.localizedDescription.UTF8String);
++            return NO;
++        }
++        self.convertPipeline = pipeline;
++        [pipeline release];
++    }
++    uint32_t r[4] = { origin.x, origin.y, size.width, size.height };
++    uint32_t d[2] = { dest.x, dest.y };
++    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
++    [encoder setComputePipelineState:self.convertPipeline];
++    [encoder setTexture:self.scanoutTexture atIndex:0];
++    [encoder setTexture:self.renderTarget atIndex:1];
++    [encoder setBytes:r length:sizeof(r) atIndex:0];
++    [encoder setBytes:d length:sizeof(d) atIndex:1];
++    [encoder dispatchThreads:MTLSizeMake(size.width, size.height, 1)
++       threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
++    [encoder endEncoding];
++    return YES;
+ }
+ 
+ @end
