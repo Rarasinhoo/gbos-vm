@@ -5,7 +5,9 @@
 // server (InputManager injection as shell), with a small line protocol:
 //   host -> guest:  G width height | M x y | D button | U button | S hscroll vscroll | X | K keycode | C base64-text
 //                   P width_mm height_mm natural | F button count [id x y]... | B level plugged charging
+//                   W vertical horizontal (high-resolution wheel, 120 = one notch)
 //   guest -> host:  c base64-text (guest clipboard changed) | m tablet|inject (pointer mode) | p touchpad|none
+//                   | w wheel|none
 // The first line from the host must be "A <token>", matching the random per-boot token the
 // launcher put on the kernel command line (ro.boot.gbos_token). Until then nothing is accepted,
 // so another program on the Mac that grabs the port first cannot drive the guest.
@@ -153,6 +155,7 @@ public final class Input {
             case 'C': setClip(p.length > 1 ? new String(Base64.decode(p[1], Base64.NO_WRAP), "UTF-8") : ""); break;
             case 'P': registerTouchpad(Float.parseFloat(p[1]), Float.parseFloat(p[2]), p.length > 3 && p[3].equals("1")); break;
             case 'F': touchFrame(p); break;
+            case 'W': wheel(Integer.parseInt(p[1]), Integer.parseInt(p[2])); break;
             case 'B': battery(Integer.parseInt(p[1]), p[2].equals("1"), p[3].equals("1")); break;
             default: break;
         }
@@ -318,6 +321,42 @@ public final class Input {
             Runtime.getRuntime().exec(new String[] { "cmd", "battery", "set", a[0], a[1] }).waitFor();
         if (batteryLevel < 0) System.out.println("VM_INPUT battery " + level + "%" + (plugged ? " plugged" : "") + (charging ? " charging" : ""));
         batteryLevel = level; batteryPlugged = plugged; batteryCharging = charging;
+    }
+
+    // W: scrolling with a Mac trackpad's precision. The USB mouse has a wheel of whole notches
+    // only (a fixed jump each); this uinput mouse has a high-resolution wheel, 1/120 notch per
+    // unit, which Android scrolls by exactly. Being a mouse, it shares Android's mouse pointer,
+    // so the scroll lands wherever that is. REL_X 0, REL_Y 1, REL_HWHEEL 6, REL_WHEEL 8,
+    // REL_WHEEL_HI_RES 11, REL_HWHEEL_HI_RES 12; BTN_LEFT 272 makes it count as a mouse.
+    private static Process wheelProcess;
+    private static OutputStream wheelOut;
+    private static void wheel(int vertical, int horizontal) {
+        if (wheelOut == null || !wheelProcess.isAlive()) {
+            try {
+                if (wheelProcess != null) wheelProcess.destroy();
+                wheelOut = null;
+                wheelProcess = new ProcessBuilder("/system/bin/uinput", "-").redirectErrorStream(true).start();
+                OutputStream o = wheelProcess.getOutputStream();
+                o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Scroll Wheel\",\"vid\":6900,\"pid\":30467,\"bus\":\"usb\","
+                        + "\"configuration\":[{\"type\":100,\"data\":[1,2]},{\"type\":101,\"data\":[272]},{\"type\":102,\"data\":[0,1,6,8,11,12]}]}\n").getBytes("UTF-8"));
+                o.flush();
+                SystemClock.sleep(1500);
+                if (!wheelProcess.isAlive()) throw new IllegalStateException("uinput exited " + wheelProcess.exitValue());
+                wheelOut = o;
+                drain(wheelProcess, "wheel");
+                System.out.println("VM_INPUT wheel registered");
+                reply("w wheel");
+            } catch (Throwable t) {
+                System.out.println("VM_INPUT wheel unavailable: " + t);
+                reply("w none");
+                return;
+            }
+        }
+        if (vertical == 0 && horizontal == 0) return;
+        try {
+            wheelOut.write(("{\"id\":1,\"command\":\"inject\",\"events\":[2,11," + vertical + ",2,12," + horizontal + ",0,0,0]}\n").getBytes("UTF-8"));
+            wheelOut.flush();
+        } catch (Throwable t) { wheelOut = null; }
     }
 
     private static void drain(Process process, String tag) {

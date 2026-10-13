@@ -28,6 +28,8 @@ static unsigned short scan[128] = {
 @property(nonatomic) BOOL touchpadReady;   // the guest has a virtual touchpad for the Mac trackpad
 @property(nonatomic) BOOL touchpadAsked;
 @property(nonatomic) NSUInteger fingers;   // contacts now on the Mac trackpad
+@property(nonatomic) BOOL wheelReady;      // the guest has a high-resolution scroll wheel
+@property(nonatomic) CGPoint wheelCarry;   // scrolling not sent yet, under 1/120 of a notch
 @property(nonatomic,strong) CSInput *input;
 @property(nonatomic) BOOL captured;
 @property(nonatomic) BOOL seamless;
@@ -176,7 +178,7 @@ static unsigned short scan[128] = {
  for(NSArray<NSNumber *> *c in contacts)[l appendFormat:@" %d %.4f %.4f",c[0].intValue,c[1].doubleValue,c[2].doubleValue];
  self.sendLine(l);
 }
-- (void)resetTouchpad {self.touchpadReady=NO;self.touchpadAsked=NO;self.padButton=0;self.padContacts=nil;self.touchIds=nil;}
+- (void)resetTouchpad {self.wheelReady=NO;self.wheelCarry=CGPointZero;self.touchpadReady=NO;self.touchpadAsked=NO;self.padButton=0;self.padContacts=nil;self.touchIds=nil;}
 // Captured mouse: move the guest's relative mouse by a distance in this view's points.
 - (void)moveBy:(CGPoint)points {
  CGFloat scale=MIN(self.bounds.size.width/self.guestSize.width,self.bounds.size.height/self.guestSize.height);if(scale<=0)scale=1;
@@ -192,7 +194,14 @@ static unsigned short scan[128] = {
  if(self.absolute){CGFloat k=e.hasPreciseScrollingDeltas?1.0/16:1.0;if(e.scrollingDeltaX||e.scrollingDeltaY)self.sendLine([NSString stringWithFormat:@"S %.3f %.3f",-e.scrollingDeltaX*k,e.scrollingDeltaY*k]);return;}
  // A trackpad's two-finger scroll (and its momentum) already reaches the guest's touchpad.
  if(self.captured&&[self padActive]&&e.hasPreciseScrollingDeltas)return;
- if([self live])[self.input sendMouseScroll:kCSInputScrollSmooth buttonMask:self.buttons dy:-e.scrollingDeltaY/10.0];}
+ if(![self live])return;
+ // The USB mouse only scrolls in whole notches (a fixed jump each). The guest's high-resolution
+ // wheel takes 1/120 notch; Android scrolls 64 dp a notch, and a dp is a macOS point at the density
+ // the VM sets, so a trackpad's points map 1:1 (momentum included). A mouse wheel's lines are notches.
+ if(self.wheelReady){double k=e.hasPreciseScrollingDeltas?120.0/64.0:120.0;
+  double v=self.wheelCarry.y+e.scrollingDeltaY*k,h=self.wheelCarry.x-e.scrollingDeltaX*k;long iv=(long)v,ih=(long)h;
+  self.wheelCarry=CGPointMake(h-ih,v-iv);if(iv||ih)self.sendLine([NSString stringWithFormat:@"W %ld %ld",iv,ih]);return;}
+ [self.input sendMouseScroll:kCSInputScrollSmooth buttonMask:self.buttons dy:-e.scrollingDeltaY/10.0];}
 - (void)keyDown:(NSEvent *)e {if([self live] && e.keyCode<128 && scan[e.keyCode])[self.input sendKey:kCSInputKeyPress code:scan[e.keyCode]];}
 - (void)keyUp:(NSEvent *)e {if([self live] && e.keyCode<128 && scan[e.keyCode])[self.input sendKey:kCSInputKeyRelease code:scan[e.keyCode]];}
 - (void)flagsChanged:(NSEvent *)e {
@@ -211,7 +220,7 @@ static unsigned short scan[128] = {
 @property(nonatomic) BOOL startFullscreen;
 @property(nonatomic,strong) NSWindow *settingsWindow;
 @property(nonatomic,strong) NSTask *vmTask;
-@property(nonatomic,strong) dispatch_source_t glide, touchTest;
+@property(nonatomic,strong) dispatch_source_t glide, touchTest, wheelTest;
 @property(nonatomic,strong) id<NSObject> activity;
 @property(nonatomic,strong) NSString *runDir;
 @property(nonatomic) BOOL quitting;
@@ -289,6 +298,14 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   // captured-mouse path, 0.2 x 0.1 points every 2 ms for 5 s, so the guest can time what arrives.
   // With VM_SELFTEST_TOUCH=1 as well, the second signal exercises the guest touchpad instead: one
   // finger glides across it, then two fingers scroll up three times (perf image: Settings is open).
+  // The third signal scrolls with the guest's high-resolution wheel: 1.5 s down in 1/4-notch
+  // steps every 8 ms, then 1.5 s back up.
+  if(getenv("VM_SELFTEST_GLIDE")&&self.touchTest){self.touchTest=nil;fprintf(stderr,"SELFTEST wheel\n");
+   __block int n=0;dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+   dispatch_source_set_timer(t,DISPATCH_TIME_NOW,8*NSEC_PER_MSEC,0);
+   dispatch_source_set_event_handler(t,^{int k=n++;if(k<375)[self ctlSend:(k<188)?@"W -30 0":@"W 30 0"];
+    else{dispatch_source_cancel(self.wheelTest);fprintf(stderr,"SELFTEST wheel done\n");}});
+   dispatch_resume(t);self.wheelTest=t;return;}
   if(getenv("VM_SELFTEST_TOUCH")&&self.glide){self.glide=nil;[self ctlSend:@"P 160 100 1"];fprintf(stderr,"SELFTEST touchpad\n");
    __block int n=0;dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
    dispatch_source_set_timer(t,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),8*NSEC_PER_MSEC,0);
@@ -505,6 +522,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  [self ctlSend:[@"C " stringByAppendingString:[[t dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]]];
 }
 - (void)ctlLine:(NSString *)line {
+ if([line hasPrefix:@"w "]){self.view.wheelReady=[line isEqualToString:@"w wheel"];fprintf(stderr,"CONTROL wheel %s\n",line.UTF8String+2);return;}
  if([line hasPrefix:@"p "]){self.view.touchpadReady=[line isEqualToString:@"p touchpad"];fprintf(stderr,"CONTROL touchpad %s\n",line.UTF8String+2);return;}
  if([line hasPrefix:@"m "]){self.view.guestCursor=[line isEqualToString:@"m tablet"]&&[self pointerMode]==0;if(!self.view.guestCursor||!self.view.inside)[self.view setHostCursorHidden:NO];else [self.view setHostCursorHidden:YES];fprintf(stderr,"CONTROL pointer mode %s\n",line.UTF8String+2);[self updateSubtitle];return;}
  if([line hasPrefix:@"c "]){
@@ -526,7 +544,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
   self.ctlFd=fd;self.ctlBuffer=[NSMutableData data];[self.view resetTouchpad];[self applyPointerMode];self.sentClipCount=-1;
   fprintf(stderr,"CONTROL connected\n");[self updateSubtitle];
   const char *tk=getenv("VM_INPUT_TOKEN");if(tk&&*tk)[self ctlSend:[NSString stringWithFormat:@"A %s",tk]];
-  [self ctlSend:batteryLine()];
+  [self ctlSend:batteryLine()];[self ctlSend:@"W 0 0"];  // creates the guest's high-resolution wheel
   [self sendGeometry];[self pushClipboard];
   dispatch_source_t rs=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,fd,0,dispatch_get_main_queue());self.readSource=rs;
   dispatch_source_set_event_handler(rs,^{
