@@ -207,6 +207,8 @@ if '--gfxstream' in sys.argv:
   assert old in b,old; b=b.replace(old,new)
  b+=b'# gfxstream: its Vulkan driver reads minigbm buffers\nro.hardware.gralloc=minigbm\n'
  files['build.prop']=(b,label,mode)
+ # Tells run_vm.py to give this image the gfxstream device (it cannot start on virgl)
+ (O/'gfxstream.json').write_text(json.dumps({'graphics':'gfxstream','driver_sha256':hashlib.sha256(files['lib64/hw/vulkan.ranchu.so'][0]).hexdigest()})+'\n')
 if '--chrome-diagnostic' in sys.argv:
  assert '--venus' in sys.argv
  add('bin/vm-chrome-diagnostic.sh',(R/'scripts/guest_chrome_diagnostic.sh').read_bytes(),'vendor_shell_exec',0o755)

@@ -479,6 +479,9 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  for(NSUInteger i=0;i<titles.count;i++){[b addItemWithTitle:titles[i]];b.lastItem.representedObject=values[i];if([values[i] isEqual:current])[b selectItemAtIndex:i];}
  return b;
 }
+- (NSTextField *)hint:(NSString *)text {
+ NSTextField *h=[NSTextField wrappingLabelWithString:text];h.textColor=NSColor.secondaryLabelColor;h.font=[NSFont systemFontOfSize:NSFont.smallSystemFontSize];return h;
+}
 - (NSButton *)checkbox:(NSString *)key title:(NSString *)title {
  NSButton *b=[NSButton checkboxWithTitle:title target:self action:@selector(checkChanged:)];b.identifier=key;
  b.state=[[NSUserDefaults standardUserDefaults] boolForKey:key]?NSControlStateValueOn:NSControlStateValueOff;return b;
@@ -506,12 +509,14 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
    @[[NSGridCell emptyContentView],[self checkbox:@"StartFullscreen" title:@"Start in full screen"]],
    @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],
    @[label(@"Processor cores:"),[self popup:@"CPUs" titles:@[@"4",@"6",@"8"] values:@[@4,@6,@8]]],
+   @[label(@"Graphics:"),[self popup:@"Graphics" titles:@[@"virgl (standard)",@"gfxstream (experimental, faster)"] values:@[@"virgl",@"gfxstream"]]],
+   @[[NSGridCell emptyContentView],[self hint:@"Graphics changes the system part: run ./update-image.sh afterwards (your data stays)."]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Networking" title:@"Networking (also needed for the pointer and clipboard link)"]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Audio" title:@"Audio output"]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Bluetooth" title:@"Bluetooth (virtual radio; needs the Android emulator installed)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
-  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,520,370) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,520,430) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
   w.title=@"Googlebook Settings";w.releasedWhenClosed=NO;[w.contentView addSubview:grid];
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;

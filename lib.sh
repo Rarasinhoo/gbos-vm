@@ -114,3 +114,9 @@ find_build_python() {
     fi
   done
 }
+# Which graphics stack images are built for: GBOS_GRAPHICS, else the app's Settings choice.
+# virgl is the standard one; gfxstream (build-gfxstream.sh) is faster but experimental.
+graphics_choice() {
+  local g="${GBOS_GRAPHICS:-$(defaults read local.googlebook.viewer Graphics 2>/dev/null || true)}"
+  [ "$g" = gfxstream ] && echo gfxstream || echo virgl
+}

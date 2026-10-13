@@ -131,12 +131,16 @@ def main():
     a.add_argument('--refresh', type=float, help='guest refresh rate in Hz (overrides --host-refresh; default 75)')
     a.add_argument('--refresh-cap', type=float, default=120, help='highest guest rate --host-refresh may pick (default 120)')
     a.add_argument('--image', help='image folder (default WORK/image)')
-    a.add_argument('--gpu', choices=('virgl', 'gfxstream'), default='virgl',
-                   help='virgl (default), or the experimental gfxstream stack (build-gfxstream.sh, a --gfxstream image)')
+    a.add_argument('--gpu', choices=('auto', 'virgl', 'gfxstream'), default='auto',
+                   help="the image's own (default): gfxstream for an image built with it (see build-gfxstream.sh), else virgl")
     args = a.parse_args()
     work = Path(args.work).resolve()
     assert args.name.replace('-', '').replace('_', '').isalnum() and 10 <= args.seconds <= 86400
     image = Path(args.image).resolve() if args.image else work / 'image'
+    if args.gpu == 'auto':
+        args.gpu = 'gfxstream' if (image / 'gfxstream.json').exists() else 'virgl'
+    if args.gpu == 'gfxstream' and not (work / 'build/qemu-gfx/libqemu-aarch64-softmmu.dylib').exists():
+        sys.exit('this image uses gfxstream graphics; run ./build-gfxstream.sh first')
     host, utm = work / 'host', work / 'UTM-beta/UTM.app'
     for p in (host / 'qemu-interop', host / 'qemu-aarch64-softmmu', host / 'virgl_render_server',
               image / 'googlebook.raw', image / 'initrd.img', image / 'kernel.Image', utm / 'Contents/Frameworks'):

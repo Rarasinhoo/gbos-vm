@@ -18,5 +18,7 @@ cp -c "$IMAGE_DIR/googlebook.raw" "$IMAGE_DIR/googlebook.raw.before-update"
 python3 "$ROOT/image/sync_super.py" "$IMAGE_DIR/googlebook.raw" "$NEW/googlebook.raw" \
   || { mv -f "$IMAGE_DIR/googlebook.raw.before-update" "$IMAGE_DIR/googlebook.raw"; die "update failed; your disk is unchanged"; }
 mv -f "$NEW/initrd.img" "$NEW/kernel.Image" "$IMAGE_DIR/"
+rm -f "$IMAGE_DIR/gfxstream.json"  # the new build says again if it is one
 cp "$NEW"/*.json "$IMAGE_DIR/" 2>/dev/null || true
+say "Graphics: $([ -f "$IMAGE_DIR/gfxstream.json" ] && echo gfxstream || echo virgl)"
 say "Image updated"

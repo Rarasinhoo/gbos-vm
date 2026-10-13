@@ -11,6 +11,11 @@ for f in "$WORK/googlebook/mica-recovery.raw" "$WORK/cuttlefish/manifest.json" "
   [ -e "$f" ] || die "missing input: $f"
 done
 IMAGE_DIR="${GBOS_IMAGE_DIR:-$WORK/image}"
+GRAPHICS_FLAGS=""
+case " ${GBOS_IMAGE_FLAGS:-} " in *" --gfxstream "*) ;; *) [ "$(graphics_choice)" = gfxstream ] && GRAPHICS_FLAGS="--gfxstream" ;; esac
+case " ${GBOS_IMAGE_FLAGS:-} $GRAPHICS_FLAGS " in *" --gfxstream "*)
+  [ -f "$GUEST/vulkan.gfxstream.so" ] && [ -f "$WORK/build/qemu-gfx/libqemu-aarch64-softmmu.dylib" ] || "$ROOT/build-gfxstream.sh" ;;
+esac
 [ -e "$IMAGE_DIR/googlebook.raw" ] && die "$IMAGE_DIR already has a disk; move it away first (it holds your data)"
 
 # The image scripts expect one root folder with fixed relative paths (artifacts/, experiments/,
@@ -39,7 +44,7 @@ python3 scripts/make_mica_gpu_initrd.py >>"$WORK/build-image.log" 2>&1 || { tail
 say "Vendor overlay, policy and services"
 python3 scripts/make_mica_security_port.py base --graphics --audio --vm-compat --locksettings --offline-desktop \
   --quiet-diagnostics --runtime-diagnostics --crash-diagnostics --venus --vulkan-desktop --quiet-absent-hardware \
-  --host-control --host-input --bluetooth ${GBOS_IMAGE_FLAGS:-} >>"$WORK/build-image.log" 2>&1 || { tail -30 "$WORK/build-image.log"; die "image assembly failed"; }
+  --host-control --host-input --bluetooth $GRAPHICS_FLAGS ${GBOS_IMAGE_FLAGS:-} >>"$WORK/build-image.log" 2>&1 || { tail -30 "$WORK/build-image.log"; die "image assembly failed"; }
 
 say "User data area and extra kernel modules"
 { python3 scripts/expand_mica_userdata.py artifacts/mica/base/googlebook.raw \
