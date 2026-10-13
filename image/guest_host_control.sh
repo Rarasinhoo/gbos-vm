@@ -13,6 +13,18 @@ handle() {
     VM_PASTE1\ *)
       t=$(printf %s "${line#VM_PASTE1 }" | base64 -d 2>/dev/null)
       [ -n "$t" ] && timeout 20 input text "$t" ;;
+    VM_WAKE)
+      # Screen on and past the lock screen (the Mac side is in use)
+      timeout 5 input keyevent KEYCODE_WAKEUP
+      timeout 5 wm dismiss-keyguard
+      echo "VM_CONTROL wake $(timeout 5 dumpsys power 2>/dev/null | grep -m1 -o 'mWakefulness=[A-Za-z]*')" ;;
+    VM_OPEN_URL\ *)
+      # Open a web link from the Mac in its app (only http and https)
+      u=$(timeout 5 am get-current-user); url=$(printf %s "${line#VM_OPEN_URL }" | base64 -d 2>/dev/null)
+      case "$url" in
+        http://*|https://*) timeout 10 am start --user "$u" -a android.intent.action.VIEW -d "$url" 2>&1 | head -3 | sed 's/^/VM_CONTROL open /' ;;
+        *) echo "VM_CONTROL open refused" ;;
+      esac ;;
     VM_DENSITY\ [0-9][0-9][0-9])
       timeout 8 wm density "${line#VM_DENSITY }"
       echo "VM_CONTROL density $(timeout 5 wm density | tr '\n' ' ')" ;;
@@ -39,6 +51,12 @@ handle() {
       for f in /product/media/audio/ringtones/*.ogg /system/media/audio/ringtones/*.ogg /product/media/audio/alarms/*.ogg /system/media/audio/alarms/*.ogg; do [ -f "$f" ] && break; done
       echo "VM_CONTROL play $f"
       timeout 10 am start --user "$u" -a android.intent.action.VIEW -t audio/ogg -d "file://$f" 2>&1 | head -6 | sed 's/^/VM_CONTROL play /' ;;
+    VM_LOG)
+      # Recent warnings and errors, and what is on screen, for diagnosing a misbehaving app
+      timeout 10 logcat -d -b main,system,crash -t 4000 '*:W' 2>/dev/null | grep -v -E 'audit|avc:|libperfmgr|touchpad-inhibitor|ServiceManagerCppClient|ctl.interface_start|QMI_FW|pd-mapper|memtrack|[sac]+dsprpcd|sscrpcd|QSEECOMD|ssgqmigd|MinkDaemon|timberslide|PerMgr|tftp_server|WakeLock|PlayCommon' | tail -120 | cut -c1-220 | sed 's/^/VM_CONTROL log /'
+      timeout 10 logcat -d -b main,system,events -t 20000 2>/dev/null | grep -E 'ActivityTaskManager|am_create_activity|am_crash|am_proc_died|wm_finish_activity|ActivityStarter' | tail -30 | cut -c1-220 | sed 's/^/VM_CONTROL starts /'
+      timeout 8 dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -4 | cut -c1-200 | sed 's/^/VM_CONTROL focus /'
+      timeout 8 dumpsys activity activities 2>/dev/null | grep -E 'ResumedActivity|\* Task\{|  \* Hist' | head -12 | cut -c1-200 | sed 's/^/VM_CONTROL activity /' ;;
     VM_TOP)
       # What is using the guest's CPUs: one snapshot of the busiest processes and threads
       timeout 10 top -b -n 1 -m 20 2>&1 | head -30 | cut -c1-150 | sed 's/^/VM_CONTROL top /'

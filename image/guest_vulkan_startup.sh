@@ -17,6 +17,8 @@ timeout 25 /vendor/bin/vm-vulkan-probe --ahb-render
 echo VM_AHB_RENDER_PROBE_EXIT=$?
 timeout 25 /vendor/bin/vm-vulkan-probe --ahb-render-bgra
 echo VM_AHB_BGRA_PROBE_EXIT=$?
+# Video: decoders hand over YUV buffers (flexible 4:2:0 and YV12)
+for f in 0x23 0x32315659; do timeout 25 /vendor/bin/vm-vulkan-probe --yuv $f; echo VM_YUV_PROBE_EXIT=$f,$?; done
 # ANGLE, EGL and buffer errors too (GLES runs on ANGLE with --gfxstream images)
 logcat -d -b all -t 3000 -v threadtime | grep -E -i 'angle|libEGL|gfxstream|AHardwareBuffer|GraphicBuffer|Skia|RenderEngine|minigbm|gralloc' | grep -E ' [EWF] ' | tail -60
 # The 60 log lines (any process, info and up) before SurfaceFlinger's first fatal error

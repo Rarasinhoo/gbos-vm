@@ -29,6 +29,52 @@ index c54f57b..95d5c64 100644
  
  #====================================#
  #   Standard deps                    #
+diff --git a/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp b/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp
+index 6dad6da..c786e43 100644
+--- a/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp
++++ b/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp
+@@ -157,6 +157,10 @@ static std::vector<const char*> filteredDeviceExtensionNames(
+             } else {
+                 retList.push_back(extName);
+             }
++        } else if (!strncmp(extName, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME,
++                            VK_MAX_EXTENSION_NAME_SIZE) &&
++                   physical_device->doProvokingVertexEmulation) {
++            // Offered by the guest alone: the host never hears of it
+         } else if (!isGuestEmulatedDeviceExtension(extName)) {
+             retList.push_back(extName);
+         }
+@@ -213,6 +217,14 @@ static VkResult gfxstream_vk_physical_device_init(
+         physical_device->doImageDrmFormatModifierEmulation = false;
+     }
+ 
++    // ANGLE offers OpenGL ES 3 only with VK_EXT_provoking_vertex (GL takes flat-shaded values
++    // from a primitive's last vertex), and MoltenVK has it only when built to use private Metal
++    // API. Offer it anyway: drivers without it take the first vertex, which differs only where a
++    // flat-shaded value varies within a primitive. Without it, Chrome and every other GLES 3 app
++    // fail to start.
++    physical_device->doProvokingVertexEmulation = !supported_extensions.EXT_provoking_vertex;
++    supported_extensions.EXT_provoking_vertex = true;
++
+     struct vk_physical_device_dispatch_table dispatch_table;
+     memset(&dispatch_table, 0, sizeof(struct vk_physical_device_dispatch_table));
+     vk_physical_device_dispatch_table_from_entrypoints(
+@@ -562,6 +574,15 @@ VkResult gfxstream_vk_CreateDevice(VkPhysicalDevice physicalDevice,
+         mutableSwapchainMaintenance1Features->swapchainMaintenance1 = VK_FALSE;
+     }
+ 
++    // An emulated VK_EXT_provoking_vertex: the host must not be asked for its features
++    VkPhysicalDeviceProvokingVertexFeaturesEXT* mutableProvokingVertexFeatures =
++        vk_find_struct(const_cast<VkDeviceCreateInfo*>(pCreateInfo),
++                       PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT);
++    if (mutableProvokingVertexFeatures && gfxstream_physicalDevice->doProvokingVertexEmulation) {
++        mutableProvokingVertexFeatures->provokingVertexLast = VK_FALSE;
++        mutableProvokingVertexFeatures->transformFeedbackPreservesProvokingVertex = VK_FALSE;
++    }
++
+     const VkAllocationCallbacks* pMesaAllocator =
+         pAllocator ?: &gfxstream_physicalDevice->instance->base.alloc;
+ 
 diff --git a/src/gfxstream/guest/vulkan/meson.build b/src/gfxstream/guest/vulkan/meson.build
 index e38c96d..b0eb918 100644
 --- a/src/gfxstream/guest/vulkan/meson.build
@@ -46,3 +92,33 @@ index e38c96d..b0eb918 100644
  
  gfxstream_deps += dep_gfxstream_stubs
  
+diff --git a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
+index e73426e..cf3da96 100644
+--- a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
++++ b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
+@@ -2130,6 +2130,12 @@ void ResourceTracker::on_vkGetPhysicalDeviceFeatures2(void*, VkPhysicalDevice,
+         if (memoryReportFeaturesEXT) {
+             memoryReportFeaturesEXT->deviceMemoryReport = VK_TRUE;
+         }
++        // Always offered, emulated where the host lacks it (see gfxstream_vk_physical_device_init)
++        VkPhysicalDeviceProvokingVertexFeaturesEXT* provokingVertexFeatures =
++            vk_find_struct(pFeatures, PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT);
++        if (provokingVertexFeatures) {
++            provokingVertexFeatures->provokingVertexLast = VK_TRUE;
++        }
+     }
+ }
+ 
+diff --git a/src/gfxstream/guest/vulkan_enc/gfxstream_vk_private.h b/src/gfxstream/guest/vulkan_enc/gfxstream_vk_private.h
+index a52fdeb..6a545bd 100644
+--- a/src/gfxstream/guest/vulkan_enc/gfxstream_vk_private.h
++++ b/src/gfxstream/guest/vulkan_enc/gfxstream_vk_private.h
+@@ -103,6 +103,8 @@ struct gfxstream_vk_physical_device {
+     const struct vk_sync_type* sync_types[2];
+     struct gfxstream_vk_instance* instance;
+     bool doImageDrmFormatModifierEmulation;
++    /* VK_EXT_provoking_vertex offered without the host (see gfxstream_vk_physical_device_init) */
++    bool doProvokingVertexEmulation;
+ };
+ VK_DEFINE_HANDLE_CASTS(gfxstream_vk_physical_device, base.base, VkPhysicalDevice,
+                        VK_OBJECT_TYPE_PHYSICAL_DEVICE)
