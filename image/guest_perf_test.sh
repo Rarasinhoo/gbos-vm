@@ -80,8 +80,10 @@ tp=; for d in $(ls /dev/input/event* | sort -t t -k 2 -n); do getevent -p "$d" 2
 echo "VM_PERF touch dev=$tp events=$(grep -c SYN_REPORT /data/local/tmp/vm-perf-touch.txt 2>/dev/null) fingers2=$(grep -c 'BTN_TOOL_DOUBLETAP *DOWN' /data/local/tmp/vm-perf-touch.txt 2>/dev/null)"
 grep -m8 -E 'ABS_MT|BTN_TOOL|BTN_TOUCH' /data/local/tmp/vm-perf-touch.txt 2>/dev/null | tr -s ' ' | cut -c1-100 | sed 's/^/VM_PERF touch raw /'
 # Report spacing as the guest got it (bunched reports would read as no motion)
-tr -d '[]' < /data/local/tmp/vm-perf-touch.txt 2>/dev/null | awk '/SYN_REPORT/ {if (l) {g = ($1 - l) * 1000; s += g; n++; if (g > m) m = g; if (g < 1) b++} l = $1}
-  END {if (n) printf "VM_PERF touch timing reports=%d mean_gap_ms=%.1f max_gap_ms=%.1f under_1ms=%d\n", n, s / n, m, b}'
+# Gaps between reports while fingers move (pauses over 100 ms left out): even is good, clumps
+# (many near 0 with long ones between) are what makes the pointer stutter
+tr -d '[]' < /data/local/tmp/vm-perf-touch.txt 2>/dev/null | awk '/SYN_REPORT/ {if (l) {g = ($1 - l) * 1000; if (g < 100) print g} l = $1}' | sort -n > /data/local/tmp/vm-perf-gaps.txt
+awk '{g[NR] = $1; if ($1 < 2) c++} END {if (NR) printf "VM_PERF touch timing reports=%d gap_ms p10=%.1f p50=%.1f p90=%.1f p99=%.1f under_2ms=%d\n", NR, g[int(NR*.1)+1], g[int(NR*.5)+1], g[int(NR*.9)+1], g[int(NR*.99)+1], c}' /data/local/tmp/vm-perf-gaps.txt
 # What Android made of it: motion events from the touchpad by action, button and classification
 logcat -d 2>/dev/null | grep -i 'notifyMotion' > /data/local/tmp/vm-perf-motion.txt
 echo "VM_PERF touch motions=$(grep -c . /data/local/tmp/vm-perf-motion.txt)"
