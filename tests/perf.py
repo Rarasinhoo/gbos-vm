@@ -49,7 +49,7 @@ def main():
     viewer = subprocess.Popen([str(work / 'host/Googlebook VM.app/Contents/MacOS/GooglebookViewer'), str(run / 'spice.sock')],
                               env=env, stdout=(run / 'viewer.log').open('w'), stderr=subprocess.STDOUT, start_new_session=True)
     # Timestamp both logs on arrival, so viewer samples can be matched to the guest's scroll rounds.
-    events = []; offsets = {'serial': 0, 'viewer': 0}; start = time.monotonic(); glided = touched = False
+    events = []; offsets = {'serial': 0, 'viewer': 0}; start = time.monotonic(); glided = touched = wheeled = False
     try:
         while vm.poll() is None and time.monotonic() - start < 600:
             time.sleep(.5); now = time.monotonic() - start
@@ -62,6 +62,9 @@ def main():
             # ...and then its touchpad (the hook's second run)
             if glided and not touched and any('VM_PERF touch_ready' in l for _, _, l in events):
                 touched = True; time.sleep(1); os.kill(viewer.pid, signal.SIGUSR2)
+            # ...and then its high-resolution wheel (the third run)
+            if touched and not wheeled and any('VM_PERF wheel_ready' in l for _, _, l in events):
+                wheeled = True; time.sleep(1); os.kill(viewer.pid, signal.SIGUSR2)
             if any('VM_PERF_END' in l for _, _, l in events): break
     finally:
         if vm.poll() is None: os.killpg(vm.pid, signal.SIGTERM)
@@ -74,6 +77,7 @@ def main():
               'mouse': [l.split('VM_PERF mouse ', 1)[1] for _, s, l in events if s == 'serial' and 'VM_PERF mouse ' in l],
               'touch': [l.split('VM_PERF ', 1)[1] for _, s, l in events if s == 'serial' and re.search(r'VM_PERF touch', l)],
               'zram': [l.split('VM_PERF zram ', 1)[1] for _, s, l in events if s == 'serial' and 'VM_PERF zram ' in l],
+              'wheel': [l.split('VM_PERF wheel ', 1)[1] for _, s, l in events if s == 'serial' and 'VM_PERF wheel ' in l],
               'battery': [l.split('VM_PERF battery ', 1)[1] for _, s, l in events if s == 'serial' and 'VM_PERF battery ' in l],
               'rounds': []}
     (run / 'perf-events.json').write_text(json.dumps(events))

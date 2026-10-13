@@ -94,6 +94,18 @@ dumpsys window 2>/dev/null | grep -m3 -E 'mCurrentFocus|mFocusedApp' | cut -c1-1
 dumpsys input 2>/dev/null | awk '/VM Touchpad/ {f = 1} f && /Sources|Classes|Touchpad|Gesture/ {print; if (++c >= 4) exit}' | cut -c1-140 | sed 's/^ */VM_PERF touch device /'
 dumpsys gfxinfo $pkg 2>/dev/null | grep -E '^(Total frames rendered|Janky frames)' | sed 's/^/VM_PERF touch /'
 echo "VM_PERF touch settings tap=$(settings --user "$u" get system touchpad_tap_to_click) natural=$(settings --user "$u" get system touchpad_natural_scrolling)"
+# Wheel: the host scrolls with the high-resolution wheel (W lines), down then up, over a list long
+# enough to scroll on any screen (all apps), opened fresh.
+am force-stop com.android.settings >/dev/null 2>&1
+am start --user "$u" -a android.settings.MANAGE_ALL_APPLICATIONS_SETTINGS >/dev/null 2>&1; sleep 6
+dumpsys gfxinfo $pkg reset >/dev/null 2>&1; logcat -c 2>/dev/null
+echo "VM_PERF wheel_ready"
+sleep 8
+logcat -d 2>/dev/null | grep -i 'notifyMotion' | grep -c 'action=SCROLL' | sed 's/^/VM_PERF wheel scroll_events=/'
+logcat -d 2>/dev/null | grep -i 'notifyMotion' | grep -m2 'action=SCROLL' | sed 's/.*notifyMotion/notifyMotion/' | cut -c1-420 | sed 's/^/VM_PERF wheel sample /'
+dumpsys window windows 2>/dev/null | grep -E 'Window #[0-9]+ Window\{.*(Settings|Manage)|mFrame=|mHasSurface=true' | grep -A1 -E 'Settings|Manage' | head -4 | cut -c1-200 | sed 's/^ */VM_PERF wheel window /'
+dumpsys input 2>/dev/null | awk '/VM Scroll Wheel/ {f = 1} f && /Classes|Sources/ {print; if (++c >= 2) exit}' | cut -c1-120 | sed 's/^ */VM_PERF wheel device /'
+dumpsys gfxinfo $pkg 2>/dev/null | grep -E '^(Total frames rendered|Janky frames)' | sed 's/^/VM_PERF wheel /'
 # Battery: the viewer passes the Mac's own through (a VM has none, so Android showed it empty).
 dumpsys battery 2>/dev/null | grep -E '^ *(AC powered|present|status|level):' | tr -s ' ' | tr '\n' ' ' | sed 's/^/VM_PERF battery /'; echo
 echo VM_PERF_END
