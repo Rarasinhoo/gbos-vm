@@ -97,14 +97,21 @@ def qemu_at_refresh(host, hz):
         return None
 
 
-def guest_refresh(host_hz, any_rate=True):
+def guest_refresh(host_hz, any_rate=True, cap=75):
     """The guest refresh rate that paces best on a host_hz screen. With a QEMU we can patch
-    (any_rate), that is the screen's own rate, or a whole fraction of it above 120 Hz (144 -> 72)
-    to keep the guest's GPU load sane. Otherwise only 60 Hz (no EDID: the guest driver's own
-    59.95 Hz mode) and 75 Hz (QEMU's EDID) are on offer: a screen that is a whole multiple of one
-    shows every frame for the same time, and failing that the rate with fewer uneven frames per
-    second (the beat against the nearest multiple) wins."""
-    if any_rate: return host_hz / math.ceil(host_hz / 120 - 1e-6)
+    (any_rate), that is the largest whole fraction of the screen's rate up to cap (120 -> 60,
+    144 -> 72), so every frame stays up for the same number of refreshes; a screen up to 90 Hz
+    that would drop below 50 that way (85 -> 42.5) keeps its own rate instead. The cap is there
+    because QEMU does the guest's GL work on the same thread that delivers input: at 120 Hz the
+    mouse reached the guest in clumps (half the frames without a pointer update), at 60 Hz evenly.
+    Otherwise only 60 Hz (no EDID: the guest driver's own 59.95 Hz mode) and 75 Hz (QEMU's EDID)
+    are on offer: a screen that is a whole multiple of one shows every frame for the same time,
+    and failing that the rate with fewer uneven frames per second (the beat against the nearest
+    multiple) wins."""
+    if any_rate:
+        fits = [host_hz / k for k in range(1, 9) if host_hz / k <= cap + 1e-6]
+        best = fits[0] if fits else cap
+        return best if best >= 50 or host_hz > 90 else host_hz
     beat = lambda r: min(abs(host_hz - k * r) for k in range(1, 5))
     return min((60, 75), key=lambda r: beat(59.95 if r == 60 else 75))
 
@@ -119,6 +126,7 @@ def main():
     a.add_argument('--cpus', type=int, default=6)
     a.add_argument('--host-refresh', type=float, help="the Mac screen's refresh rate; picks the guest rate that paces best on it")
     a.add_argument('--refresh', type=float, help='guest refresh rate in Hz (overrides --host-refresh; default 75)')
+    a.add_argument('--refresh-cap', type=float, default=75, help='highest guest rate --host-refresh may pick (default 75)')
     a.add_argument('--image', help='image folder (default WORK/image)')
     args = a.parse_args()
     work = Path(args.work).resolve()
@@ -129,7 +137,7 @@ def main():
               image / 'googlebook.raw', image / 'initrd.img', image / 'kernel.Image', utm / 'Contents/Frameworks'):
         if not p.exists(): sys.exit(f'missing: {p}')
     width, height = args.display.split('x')
-    refresh = args.refresh or (guest_refresh(args.host_refresh) if args.host_refresh else 75)
+    refresh = args.refresh or (guest_refresh(args.host_refresh, cap=args.refresh_cap) if args.host_refresh else 75)
     qemu, edid = qemu_at_refresh(host, refresh), True
     if qemu is None:  # an unknown QEMU build: fall back to the two rates it offers unmodified
         refresh = guest_refresh(args.host_refresh or refresh, any_rate=False)
