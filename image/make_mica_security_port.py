@@ -138,6 +138,21 @@ if '--stress-test' in sys.argv:
 on post-fs-data
     start vm-stress-test
 ''','vendor_configs_file')
+if '--pointer-test' in sys.argv:
+ # Test images only: open an app that asks for pointer capture (see tests/pointer_capture.py).
+ add('etc/vm-pointer-test.apk',(GUEST/'vm-pointer-test.apk').read_bytes(),'vendor_configs_file')
+ add('bin/vm-pointer-test.sh',(R/'scripts/guest_pointer_test.sh').read_bytes(),'vendor_shell_exec',0o755)
+ add('etc/init/vm-pointer-test.rc',b'''service vm-pointer-test /system/bin/sh /vendor/bin/vm-pointer-test.sh
+    disabled
+    oneshot
+    user shell
+    group shell log readproc
+    seclabel u:r:shell:s0
+    console ttyAMA0
+
+on property:sys.boot_completed=1
+    start vm-pointer-test
+''','vendor_configs_file')
 if '--perf-test' in sys.argv:
  # Test images only: scroll Settings and print frame statistics after boot (see guest_perf_test.sh).
  add('bin/vm-perf-test.sh',(R/'scripts/guest_perf_test.sh').read_bytes(),'vendor_shell_exec',0o755)

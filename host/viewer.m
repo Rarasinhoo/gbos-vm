@@ -49,7 +49,9 @@ static unsigned short scan[128] = {
 // Absolute mode: a helper inside Android injects pointer events at exact guest
 // coordinates, so the Mac cursor is the pointer and nothing needs steering.
 @property(nonatomic) BOOL absolute;
-@property(nonatomic) BOOL guestCursor; // Android draws the pointer itself (tablet mode)
+// An Android app holds pointer capture (wantsLock) and the Mac mouse is locked for it (locked):
+// motion goes to the helper's relative mouse instead.
+@property(nonatomic) BOOL wantsLock, locked;
 // NO while waiting for the helper: moving the emulated USB mouse at all leaves a second,
 // frozen Android cursor on screen once the helper takes over.
 @property(nonatomic) BOOL relativeAllowed;
@@ -76,13 +78,28 @@ static unsigned short scan[128] = {
  CGFloat x=(p.x-(b.width-g.width*s)/2)/s,y=(b.height-p.y-(b.height-g.height*s)/2)/s;
  return CGPointMake(MAX(0,MIN(g.width-1,x)),MAX(0,MIN(g.height-1,y)));
 }
-- (void)mouseEntered:(NSEvent *)e {if(self.absolute){self.inside=YES;if(self.guestCursor)[self setHostCursorHidden:YES];}}
-- (void)mouseExited:(NSEvent *)e {if(self.absolute){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}}
+- (void)mouseEntered:(NSEvent *)e {if(self.absolute)self.inside=YES;}
+- (void)mouseExited:(NSEvent *)e {if(self.absolute&&!self.locked){self.inside=NO;self.sendLine(@"X");}}
+// Lock the Mac mouse for the Android app that asked for pointer capture: only while this window
+// is in front with the pointer over it, so an app in the background can't take the mouse away.
+- (void)lockForApp {
+ if(self.locked||!self.wantsLock||!self.absolute||!self.window.isKeyWindow)return;
+ if(!NSPointInRect([self convertPoint:self.window.mouseLocationOutsideOfEventStream fromView:nil],self.bounds))return;
+ self.locked=YES;self.carry=CGPointZero;[self.window makeFirstResponder:self];
+ CGAssociateMouseAndMouseCursorPosition(false);[self setHostCursorHidden:YES];self.sendLine(@"Q 1");
+ [NSApp.delegate performSelector:@selector(updateSubtitle)];
+}
+- (void)unlock {
+ if(!self.locked)return;
+ self.locked=NO;self.sendLine(@"Q 0");CGAssociateMouseAndMouseCursorPosition(true);[self setHostCursorHidden:NO];
+ [NSApp.delegate performSelector:@selector(updateSubtitle)];
+}
 - (void)capture {
  if(!self.relativeAllowed)return;
  if(!self.captured && self.input){self.captured=YES;[self.window makeFirstResponder:self];[self.input requestMouseMode:YES];CGAssociateMouseAndMouseCursorPosition(false);[NSCursor hide];self.window.subtitle=@"Mouse captured • ⌃⌥ releases";}
 }
 - (void)releaseCapture {
+ [self unlock];
  if(self.touchpadReady&&(self.padContacts.count||self.padButton)){self.padButton=0;[self sendPadContacts:@[]];}
  [self.input releaseKeys];
  for(NSNumber *b in @[@(kCSInputButtonLeft),@(kCSInputButtonRight),@(kCSInputButtonMiddle)]) [self.input sendMouseButton:b.unsignedIntegerValue mask:0 pressed:NO];
@@ -91,9 +108,12 @@ static unsigned short scan[128] = {
 }
 - (BOOL)live {return self.absolute||self.captured;}
 - (void)button:(CSInputButton)b down:(BOOL)down event:(NSEvent *)e {
+ int code=b==kCSInputButtonLeft?1:(b==kCSInputButtonRight?2:4);
+ if(self.locked){self.sendLine([NSString stringWithFormat:@"%c %d",down?'D':'U',code]);return;}
+ // Released with ⌃⌥ while the app still holds capture: a click back in locks again.
+ if(self.absolute&&self.wantsLock&&down){[self lockForApp];if(self.locked)return;}
  if(self.absolute){
   [self.window makeFirstResponder:self];CGPoint g=[self guestPoint:e];
-  int code=b==kCSInputButtonLeft?1:(b==kCSInputButtonRight?2:4);
   self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);self.sendLine([NSString stringWithFormat:@"%c %d",down?'D':'U',code]);return;
  }
  if(!self.captured){if(down)[self capture];return;}
@@ -111,10 +131,13 @@ static unsigned short scan[128] = {
 - (void)otherMouseDown:(NSEvent *)e {[self button:kCSInputButtonMiddle down:YES event:e];}
 - (void)otherMouseUp:(NSEvent *)e {if([self live])[self button:kCSInputButtonMiddle down:NO event:e];}
 - (void)mouseMoved:(NSEvent *)e {
+ if(self.locked){
+  CGFloat scale=MIN(self.bounds.size.width/self.guestSize.width,self.bounds.size.height/self.guestSize.height);if(scale<=0)scale=1;
+  if(e.deltaX||e.deltaY)self.sendLine([NSString stringWithFormat:@"R %.2f %.2f",e.deltaX/scale,e.deltaY/scale]);return;}
  if(self.absolute){
   // Mouse-moved events also arrive over the title bar; only own the cursor inside the view.
   if(!NSPointInRect([self convertPoint:e.locationInWindow fromView:nil],self.bounds)){if(self.inside){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}return;}
-  self.inside=YES;if(self.guestCursor)[self setHostCursorHidden:YES];CGPoint g=[self guestPoint:e];self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);return;}
+  self.inside=YES;CGPoint g=[self guestPoint:e];self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);return;}
  if(!self.captured)return;
  // Fingers on the trackpad already move the guest pointer through its touchpad.
  if([self padActive]&&self.fingers)return;
@@ -164,7 +187,7 @@ static unsigned short scan[128] = {
 - (void)rightMouseDragged:(NSEvent *)e {[self mouseMoved:e];}
 - (void)otherMouseDragged:(NSEvent *)e {[self mouseMoved:e];}
 - (void)scrollWheel:(NSEvent *)e {
- if(self.absolute){CGFloat k=e.hasPreciseScrollingDeltas?1.0/16:1.0;if(e.scrollingDeltaX||e.scrollingDeltaY)self.sendLine([NSString stringWithFormat:@"S %.3f %.3f",-e.scrollingDeltaX*k,e.scrollingDeltaY*k]);return;}
+ if(self.absolute&&!self.locked){CGFloat k=e.hasPreciseScrollingDeltas?1.0/16:1.0;if(e.scrollingDeltaX||e.scrollingDeltaY)self.sendLine([NSString stringWithFormat:@"S %.3f %.3f",-e.scrollingDeltaX*k,e.scrollingDeltaY*k]);return;}
  // A trackpad's two-finger scroll (and its momentum) already reaches the guest's touchpad.
  if(self.captured&&[self padActive]&&e.hasPreciseScrollingDeltas)return;
  if(![self live])return;
@@ -179,7 +202,7 @@ static unsigned short scan[128] = {
 - (void)keyUp:(NSEvent *)e {if([self live] && e.keyCode<128 && scan[e.keyCode])[self.input sendKey:kCSInputKeyRelease code:scan[e.keyCode]];}
 - (void)flagsChanged:(NSEvent *)e {
  // Control+Option releases a captured mouse (the same chord UTM uses), so Esc reaches the guest.
- if(self.captured&&(e.modifierFlags&NSEventModifierFlagControl)&&(e.modifierFlags&NSEventModifierFlagOption)){[self releaseCapture];return;}
+ if((self.captured||self.locked)&&(e.modifierFlags&NSEventModifierFlagControl)&&(e.modifierFlags&NSEventModifierFlagOption)){[self releaseCapture];return;}
  if(![self live])return;NSUInteger flag=0;switch(e.keyCode){case 56:case 60:flag=NSEventModifierFlagShift;break;case 59:case 62:flag=NSEventModifierFlagControl;break;case 58:case 61:flag=NSEventModifierFlagOption;break;case 54:case 55:flag=NSEventModifierFlagCommand;break;}if(flag)[self.input sendKey:(e.modifierFlags&flag)?kCSInputKeyPress:kCSInputKeyRelease code:scan[e.keyCode]];}
 @end
 
@@ -200,10 +223,8 @@ static unsigned short scan[128] = {
 @property(nonatomic) BOOL restarting;
 @property(nonatomic) BOOL densitySent;
 @property(nonatomic) NSInteger guestDensity;
-@property(nonatomic,strong) NSPopUpButton *pointerPopup;
 @property(nonatomic,strong) GBWebcam *webcam;
 @property(nonatomic,strong) GBMicrophone *microphone;
-- (void)syncSettingsWindow;
 @property(nonatomic,strong) dispatch_source_t selftest2;
 @property(nonatomic,strong) NSMutableData *ctlOut;          // queued for the guest helper
 @property(nonatomic,strong) dispatch_source_t writeSource;  // waits for room in the socket
@@ -247,16 +268,16 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  {NSUserDefaults *u=[NSUserDefaults standardUserDefaults];  // the network checkboxes became one choice
   if(![u objectForKey:@"Network"]&&([u objectForKey:@"Networking"]||[u objectForKey:@"IsolateNetwork"]))
    [u setObject:([u objectForKey:@"Networking"]&&![u boolForKey:@"Networking"])?@"off":[u boolForKey:@"IsolateNetwork"]?@"isolated":@"full" forKey:@"Network"];
-  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"Bluetooth",@"RefreshCap",@"Graphics"])[u removeObjectForKey:k];}
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES,@"AndroidTouchpad":@NO}];
+  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"Bluetooth",@"RefreshCap",@"Graphics",@"PointerMode"])[u removeObjectForKey:k];}
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES,@"AndroidTouchpad":@NO}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
  // Started from the Dock or Finder (no socket argument): this app runs the VM itself.
  if(!self.socketPath)self.startFullscreen=[[NSUserDefaults standardUserDefaults] boolForKey:@"StartFullscreen"];
- // The captured mouse is the emulated USB one. The other modes wait for the guest helper: moving
- // the USB mouse first would leave a second, frozen Android cursor once the helper takes over.
- self.view.relativeAllowed=[self pointerMode]==2;
+ // Until the guest helper links up, wait rather than move the emulated USB mouse: moving it first
+ // would leave a second, frozen Android cursor once the helper takes over.
+ self.view.relativeAllowed=[self touchpadMode];
  if(!self.view.relativeAllowed)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(150*NSEC_PER_SEC)),dispatch_get_main_queue(),^{if(!self.view.absolute){self.view.relativeAllowed=YES;[self updateSubtitle];}});
  self.renderer=[[CSMetalRenderer alloc] initWithMetalKitView:self.view];self.view.delegate=self.renderer;
  self.window.contentView=self.view;[self.window center];[self.window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];
@@ -303,7 +324,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 - (void)fit {
  CGSize size=self.display.displaySize;if(!size.width||!size.height)return;
  if(!CGSizeEqualToSize(size,self.view.guestSize)){
-  self.view.guestSize=size;[self sendGeometry];self.window.title=[NSString stringWithFormat:@"Googlebook • %.0f×%.0f",size.width,size.height];}
+  self.view.guestSize=size;self.window.title=[NSString stringWithFormat:@"Googlebook • %.0f×%.0f",size.width,size.height];}
  self.renderer.viewportScale=MIN(self.view.drawableSize.width/size.width,self.view.drawableSize.height/size.height);self.renderer.viewportOrigin=CGPointZero;
 }
 - (void)windowDidResize:(NSNotification *)n{[self fit];}
@@ -448,32 +469,26 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  [self.ctlOut setLength:0];
  if(self.readSource){dispatch_source_cancel(self.readSource);self.readSource=nil;} // the cancel handler closes the fd
  self.ctlFd=-1;
- self.view.absolute=NO;self.view.guestCursor=NO;[self.view resetTouchpad];[self.view setHostCursorHidden:NO];fprintf(stderr,"CONTROL disconnected\n");[self updateSubtitle];
+ [self.view releaseCapture];self.view.absolute=NO;self.view.wantsLock=NO;[self.view resetTouchpad];[self.view setHostCursorHidden:NO];fprintf(stderr,"CONTROL disconnected\n");[self updateSubtitle];
 }
 - (void)updateSubtitle {
- NSInteger mode=[self pointerMode];
- if(mode==2&&self.view.relativeAllowed)self.window.subtitle=@"Captured mouse: click to capture, ⌃⌥ releases • ⌃⌘M switches pointer mode";
- else if(self.view.absolute)self.window.subtitle=self.view.guestCursor?@"Android cursor • ⌃⌘M switches pointer mode • ⌃⌘F full screen":@"Mac cursor • ⌃⌘M switches pointer mode • ⌃⌘F full screen";
- else self.window.subtitle=self.view.relativeAllowed?@"Click to capture • ⌃⌥ releases":@"Waiting for Android to link the pointer…";
+ if(self.view.locked)self.window.subtitle=@"Mouse locked by an Android app • ⌃⌥ releases";
+ else if(self.view.captured)self.window.subtitle=@"Mouse captured • ⌃⌥ releases";
+ else if(self.view.absolute)self.window.subtitle=self.view.wantsLock?@"Click to give the mouse back to the Android app":@"⌃⌘F full screen • ⌘, settings";
+ else if(self.view.relativeAllowed)self.window.subtitle=self.ctlFd>=0?@"Android touchpad: click to capture, ⌃⌥ releases":@"Click to capture • ⌃⌥ releases";
+ else self.window.subtitle=@"Waiting for Android to link the pointer…";
 }
-// Pointer modes, cycled with Ctrl+Cmd+M and remembered:
-//   (2, the captured mouse, is the default; 0 and 1 are labelled experimental in the UI.)
-//   0 Android cursor: the helper's tablet device; Android draws the pointer (guest refresh rate).
-//   1 Mac cursor:     the helper injects events; the Mac pointer is the cursor (always an arrow).
-//   2 Captured mouse: the classic emulated USB mouse; click to capture, Control+Option releases.
-- (NSInteger)pointerMode {return [[NSUserDefaults standardUserDefaults] integerForKey:@"PointerMode"]%3;}
-- (void)sendGeometry {CGSize g=self.view.guestSize;if(self.ctlFd<0||g.width<=0)return;
- [self ctlSend:[self pointerMode]==0?[NSString stringWithFormat:@"G %.0f %.0f",g.width,g.height]:@"G 0 0"];}
+// The pointer is automatic: the Mac cursor drives Android through the helper, and the mouse
+// locks only while an Android app holds pointer capture. With the Android touchpad on (or no
+// helper link), it is the emulated USB mouse instead: click to capture, Control+Option releases.
+- (BOOL)touchpadMode {return [[NSUserDefaults standardUserDefaults] boolForKey:@"AndroidTouchpad"];}
 - (void)applyPointerMode {
- NSInteger mode=[self pointerMode];
  [self.view releaseCapture];
- self.view.absolute=self.ctlFd>=0&&mode!=2;
- if(mode==2){self.view.relativeAllowed=YES;self.view.guestCursor=NO;[self.view setHostCursorHidden:NO];}
+ self.view.absolute=self.ctlFd>=0&&![self touchpadMode];
+ if([self touchpadMode])self.view.relativeAllowed=YES;
  [self updateSubtitle];
 }
-- (void)toggleCursor:(id)sender{NSUserDefaults *d=[NSUserDefaults standardUserDefaults];[d setInteger:([self pointerMode]+1)%3 forKey:@"PointerMode"];[self applyPointerMode];[self sendGeometry];[self syncSettingsWindow];}
-- (void)choosePointerMode:(NSMenuItem *)sender{[[NSUserDefaults standardUserDefaults] setInteger:sender.tag forKey:@"PointerMode"];[self applyPointerMode];[self sendGeometry];[self syncSettingsWindow];}
-- (BOOL)validateMenuItem:(NSMenuItem *)item{if(item.action==@selector(restartVM:))return self.vmTask!=nil;if(item.action==@selector(choosePointerMode:))item.state=item.tag==[self pointerMode]?NSControlStateValueOn:NSControlStateValueOff;return YES;}
+- (BOOL)validateMenuItem:(NSMenuItem *)item{if(item.action==@selector(restartVM:))return self.vmTask!=nil;return YES;}
 
 // Settings window. Pointer mode applies immediately; the rest are read by the launcher the
 // next time the VM starts (they are QEMU options), which the window says.
@@ -492,20 +507,19 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
 }
 - (void)settingChanged:(NSPopUpButton *)sender {
  [[NSUserDefaults standardUserDefaults] setObject:sender.selectedItem.representedObject forKey:sender.identifier];
- if([sender.identifier isEqualToString:@"PointerMode"]){[self applyPointerMode];[self sendGeometry];}
 }
-- (void)checkChanged:(NSButton *)sender {[[NSUserDefaults standardUserDefaults] setBool:sender.state==NSControlStateValueOn forKey:sender.identifier];}
-- (void)syncSettingsWindow {[self.pointerPopup selectItemAtIndex:([self pointerMode]+1)%3];}
+- (void)checkChanged:(NSButton *)sender {
+ [[NSUserDefaults standardUserDefaults] setBool:sender.state==NSControlStateValueOn forKey:sender.identifier];
+ if([sender.identifier isEqualToString:@"AndroidTouchpad"])[self applyPointerMode];
+}
 - (void)showSettings:(id)sender {
  if(!self.settingsWindow){
   NSTextField *(^label)(NSString *)=^NSTextField *(NSString *t){NSTextField *l=[NSTextField labelWithString:t];l.alignment=NSTextAlignmentRight;return l;};
-  self.pointerPopup=[self popup:@"PointerMode" titles:@[@"Captured mouse",@"Android cursor (experimental)",@"Mac cursor (experimental)"] values:@[@2,@0,@1]];
-  NSTextField *hint=[self hint:@"Captured mouse: click to grab, ⌃⌥ to release. ⌃⌘M cycles modes."];
+  NSTextField *hint=[self hint:@"The Mac cursor drives Android; the mouse locks only for an app that asks (⌃⌥ releases)."];
   NSTextField *note=[self hint:@"Everything below applies the next time you start the VM."];
   NSGridView *grid=[NSGridView gridViewWithViews:@[
-   @[label(@"Pointer:"),self.pointerPopup],
+   @[label(@"Pointer:"),[self checkbox:@"AndroidTouchpad" title:@"Trackpad as an Android touchpad: click to capture (experimental: gestures, can stutter)"]],
    @[[NSGridCell emptyContentView],hint],
-   @[[NSGridCell emptyContentView],[self checkbox:@"AndroidTouchpad" title:@"Trackpad as an Android touchpad (experimental: gestures, can stutter)"]],
    @[label(@"Clipboard:"),[self checkbox:@"GuestClipboardToMac" title:@"Copy text copied in Android to the Mac clipboard"]],
    @[[NSGridCell emptyContentView],note],
    @[[NSGridCell emptyContentView],[NSButton buttonWithTitle:@"Restart VM Now" target:self action:@selector(restartVM:)]],
@@ -524,7 +538,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;
  }
- [self syncSettingsWindow];[self.view releaseCapture];[self.settingsWindow makeKeyAndOrderFront:nil];
+ [self.view releaseCapture];[self.settingsWindow makeKeyAndOrderFront:nil];
 }
 - (BOOL)pushClipboard {
  if(self.ctlFd<0)return NO;
@@ -534,7 +548,8 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
 - (void)ctlLine:(NSString *)line {
  if([line hasPrefix:@"w "]){self.view.wheelReady=[line isEqualToString:@"w wheel"];fprintf(stderr,"CONTROL wheel %s\n",line.UTF8String+2);return;}
  if([line hasPrefix:@"p "]){self.view.touchpadReady=[line isEqualToString:@"p touchpad"];fprintf(stderr,"CONTROL touchpad %s\n",line.UTF8String+2);return;}
- if([line hasPrefix:@"m "]){self.view.guestCursor=[line isEqualToString:@"m tablet"]&&[self pointerMode]==0;if(!self.view.guestCursor||!self.view.inside)[self.view setHostCursorHidden:NO];else [self.view setHostCursorHidden:YES];fprintf(stderr,"CONTROL pointer mode %s\n",line.UTF8String+2);[self updateSubtitle];return;}
+ if([line hasPrefix:@"k "]){self.view.wantsLock=[line isEqualToString:@"k 1"];fprintf(stderr,"CONTROL pointer capture %s\n",self.view.wantsLock?"requested":"released");
+  if(self.view.wantsLock)[self.view lockForApp];else [self.view unlock];[self updateSubtitle];return;}
  // Guest to Mac clipboard is opt in (Settings): a guest app could plant text to paste into Terminal.
  if([line hasPrefix:@"c "]&&[[NSUserDefaults standardUserDefaults] boolForKey:@"GuestClipboardToMac"]){
   NSData *d=[[NSData alloc] initWithBase64EncodedString:[line substringFromIndex:2] options:0];NSString *t=d?[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]:nil;
@@ -590,7 +605,6 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
     [self.view resetTouchpad];[self applyPointerMode];
     fprintf(stderr,"CONTROL connected\n");[self updateSubtitle];
     [self ctlSend:batteryLine()];[self ctlSend:@"W 0 0"];  // creates the guest's high-resolution wheel
-    [self sendGeometry];
    }
    // Cap the line length, much lower before the token is proven.
    if(buffer.length>(authed?(2u<<20):512u)){fprintf(stderr,"CONTROL dropped peer: line too long\n");[self ctlDrop:rs];}
@@ -639,12 +653,6 @@ int main(int argc,char **argv){@autoreleasepool {
  [editMenu addItemWithTitle:@"Paste into Guest" action:@selector(pasteIntoGuest:) keyEquivalent:@"v"];
  NSMenu *viewMenu=add(@"View");
  NSMenuItem *fs=[viewMenu addItemWithTitle:@"Toggle Full Screen" action:@selector(toggleFull:) keyEquivalent:@"f"];fs.keyEquivalentModifierMask=NSEventModifierFlagControl|NSEventModifierFlagCommand;
- NSMenu *pointerMenu=add(@"Pointer");
- // Captured mouse is the default; the two integrated modes still have rough edges.
- NSArray *modes=@[@"Android Cursor (Experimental)",@"Mac Cursor (Experimental)",@"Captured Mouse"];
- for(NSNumber *n in @[@2,@0,@1]){NSMenuItem *it=[pointerMenu addItemWithTitle:modes[n.integerValue] action:@selector(choosePointerMode:) keyEquivalent:@""];it.tag=n.integerValue;}
- [pointerMenu addItem:[NSMenuItem separatorItem]];
- NSMenuItem *next=[pointerMenu addItemWithTitle:@"Next Pointer Mode" action:@selector(toggleCursor:) keyEquivalent:@"m"];next.keyEquivalentModifierMask=NSEventModifierFlagControl|NSEventModifierFlagCommand;
  app.mainMenu=bar;
  App *delegate=[App new];if(argc>=2&&argv[1][0]=='/')delegate.socketPath=[NSString stringWithUTF8String:argv[1]];delegate.startFullscreen=argc==3&&!strcmp(argv[2],"--fullscreen");app.delegate=delegate;[app run];return 0;
 }}

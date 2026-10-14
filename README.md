@@ -45,15 +45,14 @@ We build and test on one machine (M5, 16 GB, macOS 27). A couple of people have 
 | Shortcut | What it does |
 |---|---|
 | `⌃⌘F` | Full screen |
-| `⌃⌘M` | Cycle pointer modes |
-| `⌃⌥` | Release a captured mouse |
+| `⌃⌥` | Release a locked or captured mouse |
 | `⌃⌘R` | Restart the VM |
 | `⌘V` | Paste the Mac clipboard into the guest |
 | `⌘,` | Settings |
 
 Android shows your Mac's battery: its level, and whether it is charging (a VM has no battery of its own, so it used to read empty). Quitting (or closing the window) shuts Android down properly. Your data lives in `work/image/googlebook.raw` and sticks around between runs.
 
-**Settings** (`⌘,`) has the pointer mode and touchpad, clipboard, resolution, memory, CPU cores, network, and toggles for audio, the camera and the microphone. Pointer mode and clipboard change right away; everything else is a VM option, so it applies the next time you start it. The refresh rate isn't a setting: it follows the screen the window opens on (Android's own refresh setting has nothing to switch between, since the virtual display offers it one rate).
+**Settings** (`⌘,`) has the touchpad option, clipboard, resolution, memory, CPU cores, network, and toggles for audio, the camera and the microphone. The touchpad and clipboard options change right away; everything else is a VM option, so it applies the next time you start it. The refresh rate isn't a setting: it follows the screen the window opens on (Android's own refresh setting has nothing to switch between, since the virtual display offers it one rate).
 
 Resolution defaults to your display's native pixels at 16:10, and Android's UI is sized the way macOS sizes its own (density 320 at native resolution on a Retina screen, macOS's 2x). On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel. Settings also offers 1080p, 1440p, 4K and 3440 × 1440 ultrawide.
 
@@ -75,16 +74,15 @@ It rebuilds whatever changed (the app, the guest helpers, the graphics stack) an
 
 If you'd rather start it from a terminal, `python3 run/launch.py work` opens the app and waits for it to quit; `--display 1920x1200` and `--fullscreen` set those options first.
 
-### Pointer modes
+### The pointer
 
-**Captured mouse** is the default: click the window to grab the mouse, `⌃⌥` to let go. It's the classic VM experience — a plain USB mouse as far as Android is concerned, so it behaves. Android's own pointer acceleration is switched off after boot, since macOS has already accelerated the movement. Scrolling goes to a high-resolution scroll wheel in the guest (1/120 of a notch per step), so a trackpad scrolls as finely as on the Mac, momentum included; a mouse wheel still moves one notch per click. With **Trackpad as an Android touchpad** on in Settings (experimental, off by default), a Mac trackpad becomes a real touchpad instead: the viewer passes your raw finger positions to a virtual multitouch touchpad in the guest, so Android does its own pointer acceleration, two-finger scrolling, pinch and swipes. Clicks follow your Mac's settings (press, or tap if you have tap to click on), and so does the scroll direction. Its touch reports reach Android less evenly than the mouse's under load, so the pointer can stutter.
+It's automatic. Your Mac cursor moves in and out of the window freely and Android follows it exactly: a small helper in the guest injects mouse events at the cursor's position, so hover, right-click and scrolling behave like a real mouse and nothing lags. Scrolling is as fine as on the Mac, momentum included.
 
-There are two integrated modes where the pointer moves in and out of the window freely. They're labelled **experimental** because they're still kind of buggy:
+When an Android app asks to lock the pointer (a game, or a web page using pointer lock), the Mac mouse locks for it and raw motion goes to a mouse that exists in Android only while it's locked. When the app lets go, so does the Mac. `⌃⌥` gets your mouse back early; clicking in the window gives it back to the app. The lock only happens while the window is in front with the cursor over it, so a game in the background can't take your mouse.
 
-- **Android cursor.** The guest draws the pointer, so it changes shape properly (I-beams, resize arrows). It trails your hand a little, and Android sees it as a stylus, which gets weird in places.
-- **Mac cursor.** Instant, but it's always an arrow.
+With **Trackpad as an Android touchpad** on in Settings (experimental, off by default), a Mac trackpad becomes a real touchpad instead: click the window to capture, `⌃⌥` to let go. The viewer passes your raw finger positions to a virtual multitouch touchpad in the guest, so Android does its own pointer acceleration, two-finger scrolling, pinch and swipes. Clicks follow your Mac's settings (press, or tap if you have tap to click on), and so does the scroll direction. Its touch reports reach Android less evenly than the mouse's under load, so the pointer can stutter. If the helper can't connect (network set to off), the same click-to-capture USB mouse is the fallback.
 
-Switch in the **Pointer** menu, in Settings, or with `⌃⌘M`. Your choice is remembered, and `⌘V` paste works in all three.
+`⌘V` pastes the Mac clipboard in every case.
 
 ### Camera and microphone
 
@@ -131,7 +129,7 @@ The graphics took the most building:
 
 **Video in the right colours.** Android's software decoders hand the compositor YV12 frames (a brightness plane, then two quarter-size colour planes). Those buffers are marked for CPU access, so the renderer made them linear, while the guest reads them through optimally tiled images bound to the same memory; on MoltenVK the two don't lay planes out alike. Three-plane images don't alias between the two sides either. YUV buffers are now always optimal and kept in the NV12 shape (brightness, then interleaved colour) on both sides, converted on the way in and out.
 
-**A pointer that isn't a mouse.** Android wouldn't accept QEMU's absolute tablet, and steering a relative mouse to match your real cursor drifts. So a tiny helper inside the guest creates a virtual drawing tablet — which Android treats as an absolute pointer — and the viewer feeds it coordinates. This doesn’t work as well as we’d like, so capturing the cursor is most reliable still. We’re hoping to improve it.
+**A pointer that isn't a mouse, until it has to be.** Android wouldn't accept QEMU's absolute tablet, and steering a relative mouse to match your real cursor drifts. So a tiny helper inside the guest injects mouse events at the exact position of your Mac cursor, the way scrcpy does. The catch is pointer capture: an app that locks the pointer wants a real relative mouse, and nothing tells a shell process when one asks. The helper reads the input service's state twice a second while you're using the VM, and when capture is requested the viewer locks the Mac mouse and the helper plugs in a virtual relative mouse, then unplugs it on release so no stray Android cursor is left behind.
 
 **A webcam that is really a process.** QEMU on macOS has no virtual camera, and the Mac's camera isn't a USB device it could pass through. But QEMU's `usb-redir` lets something outside the VM *be* a USB device, so the viewer speaks that protocol over a socket and presents a standard UVC webcam (MJPEG over a bulk endpoint) fed by AVFoundation — `host/webcam.m`. The guest kernel already has `uvcvideo`. Googlebook OS ships its own USB camera HAL, but it runs every session through GPU effects (OpenGL, OpenCL, Vulkan with external memory) the VM can't provide, so the image retires it and adds AOSP's plain V4L2 camera provider from Cuttlefish instead — `image/mica_camera_port.py`. The microphone is the same trick (`host/microphone.m`): QEMU's own audio devices and its coreaudio backend can only play sound, so the viewer presents a USB Audio Class microphone and streams one isochronous packet per millisecond from AVAudioEngine. Android then needed two changes before it would record from it. Cuttlefish's audio setup has no USB module at all, so the image adds one for input only (the speaker stays on the module that already plays it). And it declares a built-in microphone, which Android picks over a USB one when recording video; the VM has none, so the image removes it — `image/mica_audio_port.py`.
 

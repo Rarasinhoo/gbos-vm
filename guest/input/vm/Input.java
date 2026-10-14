@@ -3,21 +3,21 @@
 // host loopback under QEMU user networking, 10.0.2.100 in isolated mode) and, on its request, injects
 // absolute mouse events and syncs clipboard text. Same approach as scrcpy's
 // server (InputManager injection as shell), with a small line protocol:
-//   host -> guest:  G width height | M x y | D button | U button | S hscroll vscroll | X | K keycode | C base64-text
+//   host -> guest:  M x y | D button | U button | S hscroll vscroll | X | K keycode | C base64-text
 //                   P width_mm height_mm natural | F button count [id x y]... | B level plugged charging
 //                   W vertical horizontal (high-resolution wheel, 120 = one notch)
-//   guest -> host:  c base64-text (guest clipboard changed) | m tablet|inject (pointer mode) | p touchpad|none
-//                   | w wheel|none
+//                   Q 1|0 (the Mac has locked its mouse for an app, or let go) | R dx dy (locked motion)
+//   guest -> host:  c base64-text (guest clipboard changed) | p touchpad|none | w wheel|none
+//                   | k 1|0 (an app has asked for pointer capture, or released it)
 // Both ends prove the per boot token with an HMAC exchange; the token is never sent. It arrives
 // over the serial console and vm-host-control writes it to TOKEN_FILE, readable only by shell:
 //   host -> guest:  N host-nonce
 //   guest -> host:  a guest-nonce HMAC-SHA256(token, "gbos-guest:" host-nonce ":" guest-nonce)
 //   host -> guest:  A HMAC-SHA256(token, "gbos-host:" guest-nonce ":" host-nonce)
 // Nothing else is sent or accepted until it succeeds.
-// Pointer mode "tablet": a uinput drawing-tablet device (absolute stylus on a
-// non-direct device), which makes Android draw its own cursor at the exact
-// position. If that cannot be created, events are injected instead and the
-// host cursor is the pointer.
+// The pointer: events are injected at the Mac cursor's position, and the Mac cursor is what
+// shows. When an app asks for pointer capture (a game, a browser's pointer lock), the Mac locks
+// its mouse and the motion goes to a relative uinput mouse that exists only while it is locked.
 // Touchpad: a uinput multitouch touchpad the host feeds with the Mac trackpad's raw contacts
 // (F: x and y from 0 to 1, top left origin), so Android's own touchpad stack does the pointer
 // acceleration, two-finger scrolling, pinch and swipes, as on a real touchpad.
@@ -57,10 +57,10 @@ public final class Input {
     private static String token = "", host = "10.0.2.2";
     private static boolean authed;
     private static final SecureRandom random = new SecureRandom();
-    private static Process uinput;
-    private static OutputStream tablet;
-    private static int tabletW, tabletH;
-    private static int tabletDeviceId;
+    private static Process mouseProcess;
+    private static OutputStream mouse;          // the locked mouse, while there is one
+    private static float mouseCarryX, mouseCarryY;
+    private static volatile long lastActive;    // uptime of the host's last pointer or key event
     private static Process touchpadProcess;
     private static OutputStream touchpad;
     private static int padW, padH;
@@ -84,6 +84,9 @@ public final class Input {
         Thread poll = new Thread(Input::pollClipboard, "clip");
         poll.setDaemon(true);
         poll.start();
+        Thread capture = new Thread(Input::watchPointerCapture, "capture");
+        capture.setDaemon(true);
+        capture.start();
         boolean waiting = false;
         while (true) {
             // No token, no connection.
@@ -177,15 +180,15 @@ public final class Input {
         if (line.isEmpty()) return;
         String[] p = line.split(" ");
         switch (line.charAt(0)) {
-            case 'G': registerTablet(Integer.parseInt(p[1]), Integer.parseInt(p[2])); break;
             case 'M':
+                lastActive = SystemClock.uptimeMillis();
                 x = Float.parseFloat(p[1]); y = Float.parseFloat(p[2]);
-                if (tabletAlive()) { tabletSend("3,0," + Math.round(x) + ",3,1," + Math.round(y) + ",1,320,1,0,0,0"); break; }
                 motion(buttons != 0 ? MotionEvent.ACTION_MOVE : MotionEvent.ACTION_HOVER_MOVE, 0, 0, 0);
                 break;
             case 'D': {
+                lastActive = SystemClock.uptimeMillis();
                 int b = Integer.parseInt(p[1]);
-                if (tabletAlive()) { buttons |= b; tabletSend((b == 2 ? "1,273,1," : b == 4 ? "1,274,1," : "") + "1,330,1,3,24,255,0,0,0"); break; }
+                if (mouse != null) { mouseSend("1," + mouseButton(b) + ",1,0,0,0"); break; }
                 if (buttons == 0) { downTime = SystemClock.uptimeMillis(); buttons |= b; motion(MotionEvent.ACTION_DOWN, 0, 0, 0); }
                 else buttons |= b;
                 motion(MotionEvent.ACTION_BUTTON_PRESS, b, 0, 0);
@@ -193,31 +196,33 @@ public final class Input {
             }
             case 'U': {
                 int b = Integer.parseInt(p[1]);
+                if (mouse != null) { mouseSend("1," + mouseButton(b) + ",0,0,0,0"); break; }
                 if ((buttons & b) == 0) break;
                 buttons &= ~b;
-                if (tabletAlive()) { tabletSend((b == 2 ? "1,273,0," : b == 4 ? "1,274,0," : "") + (buttons == 0 ? "1,330,0,3,24,0," : "") + "0,0,0"); break; }
                 motion(MotionEvent.ACTION_BUTTON_RELEASE, b, 0, 0);
                 if (buttons == 0) motion(MotionEvent.ACTION_UP, 0, 0, 0);
                 break;
             }
             case 'S': {
+                lastActive = SystemClock.uptimeMillis();
                 float hs = Float.parseFloat(p[1]), vs = Float.parseFloat(p[2]);
-                if (tabletAlive()) {
-                    // The tablet's wheel axes are ignored by this Android build, and a scroll injected as a
-                    // separate mouse makes apps un-hide the idle system mouse cursor and gets dropped while
-                    // the tablet hovers. So inject the scroll as if it came from the tablet itself.
-                    if (tabletDeviceId == 0) tabletDeviceId = findTabletDevice();
-                    if (tabletDeviceId != 0) scrollAs(tabletDeviceId, InputDevice.SOURCE_MOUSE | InputDevice.SOURCE_STYLUS, MotionEvent.TOOL_TYPE_STYLUS, hs, vs);
-                    break;
-                }
                 motion(MotionEvent.ACTION_SCROLL, 0, hs, vs);
                 break;
             }
             case 'X':
-                if (tabletAlive()) { if (buttons == 0) tabletSend("1,320,0,0,0,0"); break; }
                 if (buttons == 0) motion(MotionEvent.ACTION_HOVER_EXIT, 0, 0, 0);
                 break;
-            case 'K': key(Integer.parseInt(p[1])); break;
+            case 'K': lastActive = SystemClock.uptimeMillis(); key(Integer.parseInt(p[1])); break;
+            case 'Q': if (p[1].equals("1")) registerMouse(); else releaseMouse(); break;
+            case 'R': {
+                lastActive = SystemClock.uptimeMillis();
+                if (mouse == null) break;
+                float dx = mouseCarryX + Float.parseFloat(p[1]), dy = mouseCarryY + Float.parseFloat(p[2]);
+                int ix = (int) dx, iy = (int) dy;
+                mouseCarryX = dx - ix; mouseCarryY = dy - iy;
+                if (ix != 0 || iy != 0) mouseSend("2,0," + ix + ",2,1," + iy + ",0,0,0");
+                break;
+            }
             case 'C': setClip(p.length > 1 ? new String(Base64.decode(p[1], Base64.NO_WRAP), "UTF-8") : ""); break;
             case 'P': registerTouchpad(Float.parseFloat(p[1]), Float.parseFloat(p[2]), p.length > 3 && p[3].equals("1")); break;
             case 'F': touchFrame(p); break;
@@ -227,51 +232,40 @@ public final class Input {
         }
     }
 
-    private static boolean tabletAlive() {
-        if (tablet == null) return false;
-        if (uinput.isAlive()) return true;
-        tablet = null; buttons = 0;
-        System.out.println("VM_INPUT tablet process ended; injecting instead");
-        reply("m inject");
-        return false;
-    }
-
-    private static void tabletSend(String events) {
+    // The locked mouse: REL_X 0, REL_Y 1; BTN_LEFT 272, BTN_RIGHT 273, BTN_MIDDLE 274. A real
+    // relative mouse is what an app holding pointer capture reads. It is removed on release,
+    // so Android has no idle mouse cursor of its own to show afterwards.
+    private static void registerMouse() {
+        if (mouse != null && mouseProcess.isAlive()) return;
         try {
-            tablet.write(("{\"id\":1,\"command\":\"inject\",\"events\":[" + events + "]}\n").getBytes("UTF-8"));
-            tablet.flush();
-        } catch (Throwable t) { tablet = null; }
-    }
-
-    // BTN_TOOL_PEN 320, BTN_TOUCH 330, BTN_RIGHT 273, BTN_MIDDLE 274; ABS_X 0, ABS_Y 1, ABS_PRESSURE 24.
-    private static void registerTablet(int w, int h) {
-        if (tablet != null && uinput.isAlive() && w == tabletW && h == tabletH) { reply("m tablet"); return; }
-        if (w <= 0 || h <= 0) {   // host asked for injection mode (Mac cursor is the pointer)
-            if (uinput != null) uinput.destroy();
-            tablet = null; buttons = 0; tabletW = tabletH = 0;
-            reply("m inject");
-            return;
-        }
-        try {
-            if (uinput != null) uinput.destroy();
-            tablet = null; buttons = 0;
-            uinput = new ProcessBuilder("/system/bin/uinput", "-").redirectErrorStream(true).start();
-            OutputStream o = uinput.getOutputStream();
-            String axis = "{\"value\":0,\"minimum\":0,\"maximum\":%d,\"fuzz\":0,\"flat\":0,\"resolution\":0}";
-            o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Absolute Pointer\",\"vid\":6900,\"pid\":30465,\"bus\":\"usb\","
-                    + "\"configuration\":[{\"type\":100,\"data\":[1,3]},{\"type\":101,\"data\":[273,274,320,330]},{\"type\":103,\"data\":[0,1,24]}],"
-                    + "\"abs_info\":[{\"code\":0,\"info\":" + String.format(axis, w - 1) + "},{\"code\":1,\"info\":" + String.format(axis, h - 1) + "},{\"code\":24,\"info\":" + String.format(axis, 255) + "}]}\n").getBytes("UTF-8"));
+            releaseMouse();
+            mouseProcess = new ProcessBuilder("/system/bin/uinput", "-").redirectErrorStream(true).start();
+            OutputStream o = mouseProcess.getOutputStream();
+            o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Mouse\",\"vid\":6900,\"pid\":30468,\"bus\":\"usb\","
+                    + "\"configuration\":[{\"type\":100,\"data\":[1,2]},{\"type\":101,\"data\":[272,273,274]},{\"type\":102,\"data\":[0,1]}]}\n").getBytes("UTF-8"));
             o.flush();
-            int device = waitForDevice(uinput, "VM Absolute Pointer");
-            tablet = o; tabletW = w; tabletH = h; tabletDeviceId = device;
-            System.out.println("VM_INPUT tablet registered " + w + "x" + h + " device " + tabletDeviceId);
-            drain(uinput, "uinput");
-            reply("m tablet");
+            waitForDevice(mouseProcess, "VM Mouse");
+            mouse = o; mouseCarryX = mouseCarryY = 0;
+            drain(mouseProcess, "mouse");
+            System.out.println("VM_INPUT mouse locked");
         } catch (Throwable t) {
-            tablet = null;
-            System.out.println("VM_INPUT tablet unavailable: " + t);
-            reply("m inject");
+            releaseMouse();
+            System.out.println("VM_INPUT locked mouse unavailable: " + t);
         }
+    }
+
+    private static void releaseMouse() {
+        if (mouseProcess != null) { mouseProcess.destroy(); System.out.println("VM_INPUT mouse released"); }
+        mouseProcess = null; mouse = null;
+    }
+
+    private static int mouseButton(int hostButton) { return hostButton == 2 ? 273 : hostButton == 4 ? 274 : 272; }
+
+    private static void mouseSend(String events) {
+        try {
+            mouse.write(("{\"id\":1,\"command\":\"inject\",\"events\":[" + events + "]}\n").getBytes("UTF-8"));
+            mouse.flush();
+        } catch (Throwable t) { releaseMouse(); }
     }
 
     // BTN_LEFT 272, BTN_TOOL_FINGER 325, BTN_TOOL_QUINTTAP 328, BTN_TOUCH 330, BTN_TOOL_DOUBLETAP 333,
@@ -464,6 +458,8 @@ public final class Input {
     }
 
     private static void releaseAll() {
+        releaseMouse();
+        captureSent = false;
         try { if (touchpad != null) touchFrame(new String[] { "F", "0", "0" }); } catch (Throwable t) { /* gone */ }
         try {
             for (int b = 1; b <= 4 && buttons != 0; b <<= 1) if ((buttons & b) != 0) handle("U " + b);
@@ -498,8 +494,6 @@ public final class Input {
         return 0;
     }
 
-    private static int findTabletDevice() { return findDevice("VM Absolute Pointer"); }
-
     /** The id of the device a uinput process just registered, once Android has it (or 0 after
      *  3 s: it may still come, and events written meanwhile are only queued). */
     private static int waitForDevice(Process process, String name) {
@@ -510,20 +504,6 @@ public final class Input {
             if (id != 0 || SystemClock.uptimeMillis() > until) return id;
             SystemClock.sleep(30);
         }
-    }
-
-    private static void scrollAs(int deviceId, int source, int toolType, float hscroll, float vscroll) throws Exception {
-        long now = SystemClock.uptimeMillis();
-        MotionEvent.PointerProperties[] props = { new MotionEvent.PointerProperties() };
-        props[0].id = 0;
-        props[0].toolType = toolType;
-        MotionEvent.PointerCoords[] coords = { new MotionEvent.PointerCoords() };
-        coords[0].x = Math.round(x); coords[0].y = Math.round(y);
-        coords[0].setAxisValue(MotionEvent.AXIS_HSCROLL, hscroll);
-        coords[0].setAxisValue(MotionEvent.AXIS_VSCROLL, vscroll);
-        MotionEvent e = MotionEvent.obtain(now, now, MotionEvent.ACTION_SCROLL, 1, props, coords, 0, 0, 1f, 1f, deviceId, 0, source, 0);
-        inject.invoke(inputManager, e, 0);
-        e.recycle();
     }
 
     private static void key(int code) throws Exception {
@@ -562,6 +542,60 @@ public final class Input {
             lastClip = text;
             callClipboard("setPrimaryClip", ClipData.newPlainText("", text));
         } catch (Throwable t) { System.out.println("VM_INPUT setClip: " + t); }
+    }
+
+    // Pointer capture has no listener a shell process can use, so read the input service's state
+    // (the same text `dumpsys input` prints), twice a second while the Mac is using the VM.
+    private static final java.util.regex.Pattern CAPTURE =
+        java.util.regex.Pattern.compile("Pointer Capture (?:Mode )?Requested: (\\w+)");
+    private static volatile boolean captureSent;
+    private static void watchPointerCapture() {
+        IBinder service = null;
+        boolean reported = false;
+        while (true) {
+            SystemClock.sleep(500);
+            if (out == null || SystemClock.uptimeMillis() - lastActive > 10000) continue;
+            try {
+                if (service == null) service = (IBinder) Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "input");
+                long start = SystemClock.uptimeMillis();
+                String text = dump(service);
+                java.util.regex.Matcher m = CAPTURE.matcher(text);
+                // Android 16: UNCAPTURED, or the mode an app asked for; older releases: false or true
+                boolean found = m.find(), wanted = found && !m.group(1).equals("UNCAPTURED") && !m.group(1).equals("false");
+                if (!reported) {
+                    reported = true;
+                    System.out.println("VM_INPUT pointer capture " + (found ? "watched" : "state not found in the input dump")
+                                       + " (" + (SystemClock.uptimeMillis() - start) + " ms a look, " + text.length() + " chars)");
+                    if (!found) for (String l : text.split("\n")) if (l.contains("Pointer Capture")) System.out.println("VM_INPUT dump: " + l.trim());
+                }
+                if (!found) return;
+                if (wanted != captureSent) {
+                    captureSent = wanted;
+                    reply("k " + (wanted ? "1" : "0"));
+                    System.out.println("VM_INPUT pointer capture " + (wanted ? "requested" : "released"));
+                }
+            } catch (Throwable t) {
+                if (!reported) { reported = true; System.out.println("VM_INPUT pointer capture watch: " + t); }
+                service = null;
+            }
+        }
+    }
+
+    /** What a service writes for dumpsys. It writes into a pipe while we read the other end. */
+    private static String dump(IBinder service) throws Exception {
+        android.os.ParcelFileDescriptor[] pipe = android.os.ParcelFileDescriptor.createPipe();
+        java.io.ByteArrayOutputStream text = new java.io.ByteArrayOutputStream();
+        Thread reader = new Thread(() -> {
+            try (java.io.InputStream in = new android.os.ParcelFileDescriptor.AutoCloseInputStream(pipe[0])) {
+                byte[] b = new byte[16384];
+                for (int n; (n = in.read(b)) > 0; ) text.write(b, 0, n);
+            } catch (Throwable t) { /* closed */ }
+        });
+        reader.start();
+        try { service.dump(pipe[1].getFileDescriptor(), new String[0]); }
+        finally { pipe[1].close(); }
+        reader.join(2000);
+        return text.toString("UTF-8");
     }
 
     private static void pollClipboard() {
