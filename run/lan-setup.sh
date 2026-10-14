@@ -1,5 +1,6 @@
 #!/bin/bash
-# One-time setup for Settings > Network > "Same network as this Mac": puts the VM on your real
+# One-time setup for Settings > Network > "Same network as this Mac" (the app runs it, asking
+# for your password, when you choose that; it can also be run by hand): puts the VM on your real
 # network, as one more device next to the Mac, so phones nearby can find it (Quick Share, Nearby,
 # Better Together). macOS only lets root attach a VM to a network interface, so this installs
 # socket_vmnet (from Homebrew, the daemon Lima and Colima use) as a small root service bridging
@@ -15,7 +16,7 @@ SOCK=/opt/homebrew/var/run/googlebook-lan.sock
 launchctl bootout system "$PLIST" 2>/dev/null || true
 if [ "${1:-}" = --remove ]; then rm -f "$PLIST" "$SOCK"; echo "Removed."; exit 0; fi
 BIN=/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet
-[ -x "$BIN" ] || { echo "socket_vmnet isn't installed: brew install socket_vmnet" >&2; exit 1; }
+[ -x "$BIN" ] || { echo "socket_vmnet isn't installed (./prereqs.sh installs it, or: brew install socket_vmnet)" >&2; exit 1; }
 IF=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
 [ -n "$IF" ] || { echo "The Mac isn't on a network right now." >&2; exit 1; }
 mkdir -p "$(dirname "$SOCK")"

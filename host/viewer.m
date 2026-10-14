@@ -366,6 +366,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 // then connect. Quitting asks the runner to stop, which powers Android off cleanly first.
 - (void)startVM {
  NSBundle *b=NSBundle.mainBundle;NSUserDefaults *d=[NSUserDefaults standardUserDefaults];
+ if([[d stringForKey:@"Network"] isEqualToString:@"lan"]&&![self setUpNetworkBridge])[d setObject:@"full" forKey:@"Network"];
  const char *e=getenv("GOOGLEBOOK_WORK");NSString *work=e?@(e):[b objectForInfoDictionaryKey:@"GBOSWork"];
  NSString *runner=[b pathForResource:@"run_vm" ofType:@"py"];
  // Prefer the folder this app sits in (WORK/host/Googlebook VM.app), so a work folder that was
@@ -425,8 +426,6 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
    [NSApp replyToApplicationShouldTerminate:YES];
   }
   else if(me.connection)[NSApp terminate:nil];   // Android shut itself down
-  else if([[[NSUserDefaults standardUserDefaults] stringForKey:@"Network"] isEqualToString:@"lan"]&&![[NSFileManager defaultManager] fileExistsAtPath:@"/opt/homebrew/var/run/googlebook-lan.sock"])
-   [me fail:[NSString stringWithFormat:@"Settings > Network is \"Same network as this Mac\", which needs a one-time setup. In Terminal, run:\n\nsudo %@/run/lan-setup.sh\n\nor choose another network in Settings.",[[NSBundle.mainBundle objectForInfoDictionaryKey:@"GBOSWork"] stringByDeletingLastPathComponent]]];
   else [me fail:@"The VM exited before its display came up. Another Googlebook VM may already be running; otherwise check the newest folder under logs/."];
  });};
  NSError *err=nil;if(![t launchAndReturnError:&err]){[self fail:err.localizedDescription];return;}
@@ -540,7 +539,29 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  b.state=[[NSUserDefaults standardUserDefaults] boolForKey:key]?NSControlStateValueOn:NSControlStateValueOff;return b;
 }
 - (void)settingChanged:(NSPopUpButton *)sender {
+ // The VM on the Mac's own network needs the bridge service first: set it up right here
+ if([sender.identifier isEqualToString:@"Network"]&&[sender.selectedItem.representedObject isEqualToString:@"lan"]&&![self setUpNetworkBridge]){
+  [sender selectItemAtIndex:[sender indexOfItemWithRepresentedObject:[[NSUserDefaults standardUserDefaults] stringForKey:@"Network"]]];return;}
  [[NSUserDefaults standardUserDefaults] setObject:sender.selectedItem.representedObject forKey:sender.identifier];
+}
+// "Same network as this Mac" needs a small root service (socket_vmnet, see run/lan-setup.sh):
+// macOS lets only root attach a VM to a network interface. Installed once, with the usual macOS
+// password prompt. YES when it's there.
+static NSString *const kBridgeSocket=@"/opt/homebrew/var/run/googlebook-lan.sock";
+- (BOOL)setUpNetworkBridge {
+ if([[NSFileManager defaultManager] fileExistsAtPath:kBridgeSocket])return YES;
+ NSAlert *a=[NSAlert new];a.messageText=@"Put Android on this Mac's network?";
+ a.informativeText=@"Android then joins your Wi-Fi as one more device, so your phone can find it. Googlebook VM installs a small network service for this, once; macOS will ask for your password.";
+ [a addButtonWithTitle:@"Install"];[a addButtonWithTitle:@"Cancel"];
+ if([a runModal]!=NSAlertFirstButtonReturn)return NO;
+ NSString *script=[NSBundle.mainBundle pathForResource:@"lan-setup" ofType:@"sh"];
+ NSString *src=[NSString stringWithFormat:@"do shell script quoted form of \"%@\" with administrator privileges",script];
+ NSDictionary *err=nil;NSAppleEventDescriptor *r=[[[NSAppleScript alloc] initWithSource:src] executeAndReturnError:&err];
+ if(r&&[[NSFileManager defaultManager] fileExistsAtPath:kBridgeSocket])return YES;
+ if([err[NSAppleScriptErrorNumber] intValue]==-128)return NO;   // cancelled at the password prompt
+ NSAlert *f=[NSAlert new];f.messageText=@"Couldn't set up the network service";
+ f.informativeText=err[NSAppleScriptErrorMessage]?:@"See /var/log/googlebook-lan.log.";[f runModal];
+ return NO;
 }
 - (void)checkChanged:(NSButton *)sender {
  [[NSUserDefaults standardUserDefaults] setBool:sender.state==NSControlStateValueOn forKey:sender.identifier];
