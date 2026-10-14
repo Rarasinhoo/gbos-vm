@@ -45,7 +45,7 @@ def main():
     while not (run / 'spice.sock').exists():
         if vm.poll() is not None or time.monotonic() > deadline: sys.exit('VM did not start')
         time.sleep(.2)
-    env = dict(os.environ, VM_MOUSE_SEAMLESS='0', VM_MOUSE_RELATIVE='0', VM_SELFTEST_GLIDE='1', VM_SELFTEST_TOUCH='1', VM_INPUT_TOKEN=(run / 'token').read_text())
+    env = dict(os.environ, VM_SELFTEST_GLIDE='1', VM_SELFTEST_TOUCH='1', VM_INPUT_TOKEN=(run / 'token').read_text())
     viewer = subprocess.Popen([str(work / 'host/Googlebook VM.app/Contents/MacOS/GooglebookViewer'), str(run / 'spice.sock')],
                               env=env, stdout=(run / 'viewer.log').open('w'), stderr=subprocess.STDOUT, start_new_session=True)
     # Timestamp both logs on arrival, so viewer samples can be matched to the guest's scroll rounds.

@@ -12,6 +12,8 @@
 #import <netinet/tcp.h>
 #import <arpa/inet.h>
 #import <CommonCrypto/CommonHMAC.h>
+#include <errno.h>
+#include <fcntl.h>
 
 static unsigned short scan[128] = {
  [0]=0x1e,[1]=0x1f,[2]=0x20,[3]=0x21,[4]=0x23,[5]=0x22,[6]=0x2c,[7]=0x2d,[8]=0x2e,[9]=0x2f,[11]=0x30,
@@ -35,22 +37,15 @@ static unsigned short scan[128] = {
 @property(nonatomic) CGPoint wheelCarry;   // scrolling not sent yet, under 1/120 of a notch
 @property(nonatomic,strong) CSInput *input;
 @property(nonatomic) BOOL captured;
-@property(nonatomic) BOOL seamless;
 @property(nonatomic) BOOL inside;
 @property(nonatomic) BOOL cursorHidden;
 @property(nonatomic) CSInputButton buttons;
 @property(nonatomic) CGSize guestSize;
-@property(nonatomic) CGFloat gain;      // guest pixels moved per relative mouse count
-@property(nonatomic) CGPoint believed;  // where we believe the guest cursor is, in guest pixels
 @property(nonatomic) CGPoint carry;     // captured mouse: motion not sent yet, under one guest pixel
 @property(nonatomic,strong) NSMutableDictionary *touchIds;  // NSTouch identity -> small id for the guest
 @property(nonatomic) int nextTouchId, padButton;
 @property(nonatomic,strong) NSArray *padContacts;           // the last contacts sent, for button changes
 @property(nonatomic,strong) NSTrackingArea *tracking;
-@property(nonatomic) BOOL everSynced;
-@property(nonatomic) BOOL haveTarget;
-@property(nonatomic) CGPoint target;
-@property(nonatomic) NSTimeInterval syncReady;
 // Absolute mode: a helper inside Android injects pointer events at exact guest
 // coordinates, so the Mac cursor is the pointer and nothing needs steering.
 @property(nonatomic) BOOL absolute;
@@ -59,9 +54,7 @@ static unsigned short scan[128] = {
 // frozen Android cursor on screen once the helper takes over.
 @property(nonatomic) BOOL relativeAllowed;
 @property(nonatomic,copy) void (^sendLine)(NSString *);
-- (void)steerToTarget;
 - (void)releaseCapture;
-- (void)resync;
 @end
 @implementation VMView
 - (BOOL)acceptsFirstResponder{return YES;}
@@ -76,37 +69,17 @@ static unsigned short scan[128] = {
  if(hidden==self.cursorHidden)return;
  self.cursorHidden=hidden;if(hidden)[NSCursor hide];else [NSCursor unhide];
 }
-// Seamless pointer: the guest only accepts a relative mouse, so pin its cursor
-// to the top-left corner once, then steer it to wherever the Mac pointer is.
+// Where a Mac pointer event falls on the guest screen, in guest pixels.
 - (CGPoint)guestPoint:(NSEvent *)e {
  CGPoint p=[self convertPoint:e.locationInWindow fromView:nil];CGSize b=self.bounds.size,g=self.guestSize;
  CGFloat s=MIN(b.width/g.width,b.height/g.height);if(s<=0)s=1;
  CGFloat x=(p.x-(b.width-g.width*s)/2)/s,y=(b.height-p.y-(b.height-g.height*s)/2)/s;
  return CGPointMake(MAX(0,MIN(g.width-1,x)),MAX(0,MIN(g.height-1,y)));
 }
-// QEMU sums queued relative motion, so the corner pin must drain (about half a
-// second) before any further steering is sent, or the two would cancel out.
-- (void)resync {
- if(!self.input||!self.guestSize.width)return;
- [self.input sendMouseMotion:self.buttons relativePoint:CGPointMake(-ceil(self.guestSize.width/self.gain)-400,-ceil(self.guestSize.height/self.gain)-400)];
- self.believed=CGPointZero;self.everSynced=YES;
- self.syncReady=[NSDate timeIntervalSinceReferenceDate]+0.7;
- dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.72*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self steerToTarget];});
-}
-- (void)steerToTarget {
- if(!self.input||!self.guestSize.width||!self.haveTarget)return;
- if([NSDate timeIntervalSinceReferenceDate]<self.syncReady)return;
- CGPoint t=self.target;
- CGFloat ix=round((t.x-self.believed.x)/self.gain),iy=round((t.y-self.believed.y)/self.gain);
- if(ix==0&&iy==0)return;
- [self.input sendMouseMotion:self.buttons relativePoint:CGPointMake(ix,iy)];
- self.believed=CGPointMake(MAX(0,MIN(self.guestSize.width-1,self.believed.x+ix*self.gain)),MAX(0,MIN(self.guestSize.height-1,self.believed.y+iy*self.gain)));
-}
-- (void)steer:(NSEvent *)e {self.target=[self guestPoint:e];self.haveTarget=YES;[self steerToTarget];}
-- (void)mouseEntered:(NSEvent *)e {if(self.absolute){self.inside=YES;if(self.guestCursor)[self setHostCursorHidden:YES];return;}if(!self.seamless)return;self.inside=YES;[self setHostCursorHidden:YES];self.target=[self guestPoint:e];self.haveTarget=YES;if(!self.everSynced)[self resync];else [self steerToTarget];}
-- (void)mouseExited:(NSEvent *)e {if(self.absolute){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");return;}if(!self.seamless)return;self.inside=NO;[self setHostCursorHidden:NO];}
+- (void)mouseEntered:(NSEvent *)e {if(self.absolute){self.inside=YES;if(self.guestCursor)[self setHostCursorHidden:YES];}}
+- (void)mouseExited:(NSEvent *)e {if(self.absolute){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}}
 - (void)capture {
- if(self.seamless||!self.relativeAllowed)return;
+ if(!self.relativeAllowed)return;
  if(!self.captured && self.input){self.captured=YES;[self.window makeFirstResponder:self];[self.input requestMouseMode:YES];CGAssociateMouseAndMouseCursorPosition(false);[NSCursor hide];self.window.subtitle=@"Mouse captured • ⌃⌥ releases";}
 }
 - (void)releaseCapture {
@@ -114,18 +87,16 @@ static unsigned short scan[128] = {
  [self.input releaseKeys];
  for(NSNumber *b in @[@(kCSInputButtonLeft),@(kCSInputButtonRight),@(kCSInputButtonMiddle)]) [self.input sendMouseButton:b.unsignedIntegerValue mask:0 pressed:NO];
  self.buttons=0;
- if(self.seamless){self.inside=NO;[self setHostCursorHidden:NO];return;}
- if(self.captured){self.captured=NO;CGAssociateMouseAndMouseCursorPosition(true);[NSCursor unhide];self.window.subtitle=@"Click to capture • ⌃⌥ releases";}
+ if(self.captured){self.captured=NO;CGAssociateMouseAndMouseCursorPosition(true);[NSCursor unhide];[NSApp.delegate performSelector:@selector(updateSubtitle)];}
 }
-- (BOOL)live {return self.absolute||(self.seamless?(self.input!=nil):self.captured);}
+- (BOOL)live {return self.absolute||self.captured;}
 - (void)button:(CSInputButton)b down:(BOOL)down event:(NSEvent *)e {
  if(self.absolute){
   [self.window makeFirstResponder:self];CGPoint g=[self guestPoint:e];
   int code=b==kCSInputButtonLeft?1:(b==kCSInputButtonRight?2:4);
   self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);self.sendLine([NSString stringWithFormat:@"%c %d",down?'D':'U',code]);return;
  }
- if(!self.seamless&&!self.captured){if(down)[self capture];return;}
- if(self.seamless){[self.window makeFirstResponder:self];if(!self.inside){self.inside=YES;[self setHostCursorHidden:YES];}if(!self.everSynced)[self resync];[self steer:e];}
+ if(!self.captured){if(down)[self capture];return;}
  // A left click made on the trackpad is the touchpad's own button, so press-and-drag stays one
  // gesture there; right and middle clicks keep going through the USB mouse.
  if(b==kCSInputButtonLeft&&self.captured&&[self padActive]&&(self.fingers||self.padButton)){
@@ -144,7 +115,6 @@ static unsigned short scan[128] = {
   // Mouse-moved events also arrive over the title bar; only own the cursor inside the view.
   if(!NSPointInRect([self convertPoint:e.locationInWindow fromView:nil],self.bounds)){if(self.inside){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}return;}
   self.inside=YES;if(self.guestCursor)[self setHostCursorHidden:YES];CGPoint g=[self guestPoint:e];self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);return;}
- if(self.seamless){if(self.inside)[self steer:e];return;}
  if(!self.captured)return;
  // Fingers on the trackpad already move the guest pointer through its touchpad.
  if([self padActive]&&self.fingers)return;
@@ -234,8 +204,9 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) GBWebcam *webcam;
 @property(nonatomic,strong) GBMicrophone *microphone;
 - (void)syncSettingsWindow;
-@property(nonatomic,strong) dispatch_source_t selftest;
 @property(nonatomic,strong) dispatch_source_t selftest2;
+@property(nonatomic,strong) NSMutableData *ctlOut;          // queued for the guest helper
+@property(nonatomic,strong) dispatch_source_t writeSource;  // waits for room in the socket
 @property(nonatomic,strong) dispatch_source_t acceptSource;
 @property(nonatomic,strong) dispatch_source_t readSource;
 @property(nonatomic) int ctlFd;
@@ -282,10 +253,11 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
  // Started from the Dock or Finder (no socket argument): this app runs the VM itself.
- if(!self.socketPath){setenv("VM_MOUSE_SEAMLESS","0",1);setenv("VM_MOUSE_RELATIVE","0",1);self.startFullscreen=[[NSUserDefaults standardUserDefaults] boolForKey:@"StartFullscreen"];}
- const char *sm=getenv("VM_MOUSE_SEAMLESS"),*gn=getenv("VM_MOUSE_GAIN");self.view.seamless=!(sm&&!strcmp(sm,"0"));
- const char *rl=getenv("VM_MOUSE_RELATIVE");self.view.relativeAllowed=!(rl&&!strcmp(rl,"0"))||[self pointerMode]==2;
- if(!self.view.relativeAllowed)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(150*NSEC_PER_SEC)),dispatch_get_main_queue(),^{if(!self.view.absolute){self.view.relativeAllowed=YES;[self updateSubtitle];}});self.view.gain=(gn&&atof(gn)>0)?atof(gn):0.75;
+ if(!self.socketPath)self.startFullscreen=[[NSUserDefaults standardUserDefaults] boolForKey:@"StartFullscreen"];
+ // The captured mouse is the emulated USB one. The other modes wait for the guest helper: moving
+ // the USB mouse first would leave a second, frozen Android cursor once the helper takes over.
+ self.view.relativeAllowed=[self pointerMode]==2;
+ if(!self.view.relativeAllowed)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(150*NSEC_PER_SEC)),dispatch_get_main_queue(),^{if(!self.view.absolute){self.view.relativeAllowed=YES;[self updateSubtitle];}});
  self.renderer=[[CSMetalRenderer alloc] initWithMetalKitView:self.view];self.view.delegate=self.renderer;
  self.window.contentView=self.view;[self.window center];[self.window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];
  if(self.startFullscreen)[self.window toggleFullScreen:nil];
@@ -294,15 +266,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  if(![CSMain.sharedInstance spiceStart]){fprintf(stderr,"SPICE worker failed\n");[NSApp terminate:nil];return;}
  if(self.socketPath)[self connectSpice];else [self startVM];
  [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){[self fit];}];
- // Self-test hook: SIGUSR1 steers the guest cursor to the centre of its screen.
- signal(SIGUSR1,SIG_IGN);dispatch_source_t usr=dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL,SIGUSR1,0,dispatch_get_main_queue());
- dispatch_source_set_event_handler(usr,^{CGSize g=self.view.guestSize;const char *pt=getenv("VM_SELFTEST_POINT");double fx=.5,fy=.5;if(pt)sscanf(pt,"%lf,%lf",&fx,&fy);
-  if(self.view.absolute){[self ctlSend:[NSString stringWithFormat:@"M %.1f %.1f",g.width*fx,g.height*fy]];[self ctlSend:@"D 1"];dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self ctlSend:@"U 1"];});fprintf(stderr,"SELFTEST absolute %.1f %.1f\n",g.width*fx,g.height*fy);return;}self.view.target=CGPointMake(g.width*fx,g.height*fy);self.view.haveTarget=YES;[self.view resync];
-  // Click once at the target so Android's pointer-location overlay reports where the cursor really is.
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self.view.input sendMouseButton:kCSInputButtonLeft mask:kCSInputButtonLeft pressed:YES];});
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(6.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self.view.input sendMouseButton:kCSInputButtonLeft mask:0 pressed:NO];});fprintf(stderr,"SELFTEST centre gain=%.3f guest=%.0fx%.0f\n",self.view.gain,g.width,g.height);});
- dispatch_resume(usr);self.selftest=usr;
- // Self-test hook: SIGUSR2 sends a burst of scroll events at the current pointer position.
+ // Self-test hooks for tests/perf.py (VM_SELFTEST_GLIDE=1, VM_SELFTEST_TOUCH=1): each SIGUSR2 runs the next step.
  signal(SIGUSR2,SIG_IGN);dispatch_source_t usr2=dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL,SIGUSR2,0,dispatch_get_main_queue());
  dispatch_source_set_event_handler(usr2,^{
   // With VM_SELFTEST_GLIDE=1 (tests/perf.py): instead, a slow, perfectly even glide through the
@@ -331,20 +295,23 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   if(getenv("VM_SELFTEST_GLIDE")){__block int n=0;dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
    dispatch_source_set_timer(t,DISPATCH_TIME_NOW,2*NSEC_PER_MSEC,0);
    dispatch_source_set_event_handler(t,^{[self.view moveBy:CGPointMake(n%2000<1000?.2:-.2,n%2000<1000?.1:-.1)];if(++n>=2500)dispatch_source_cancel(t);});
-   dispatch_resume(t);self.glide=t;fprintf(stderr,"SELFTEST glide\n");return;}
-  for(int i=0;i<8;i++)dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(i*0.05*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self ctlSend:@"S 0.000 -0.500"];});fprintf(stderr,"SELFTEST scroll\n");});
+   dispatch_resume(t);self.glide=t;fprintf(stderr,"SELFTEST glide\n");return;} });
  dispatch_resume(usr2);self.selftest2=usr2;
  fprintf(stderr,"WINDOW %ld\n",(long)self.window.windowNumber);
- fprintf(stderr,"NATIVE_VIEWER device=%s target_hz=60 socket=%s\n",self.view.device.name.UTF8String,self.socketPath.UTF8String);
+ fprintf(stderr,"NATIVE_VIEWER device=%s socket=%s\n",self.view.device.name.UTF8String,self.socketPath.UTF8String);
 }
-- (void)fit {CGSize size=self.display.displaySize;if(size.width && size.height){if(!CGSizeEqualToSize(size,self.view.guestSize)){self.view.guestSize=size;[self sendGeometry];}self.view.guestSize=size;self.renderer.viewportScale=MIN(self.view.drawableSize.width/size.width,self.view.drawableSize.height/size.height);self.renderer.viewportOrigin=CGPointZero;self.window.title=[NSString stringWithFormat:@"Googlebook • %.0f×%.0f • %@",size.width,size.height,self.display.isGLEnabled?@"Metal / IOSurface":@"SPICE"];}}
+- (void)fit {
+ CGSize size=self.display.displaySize;if(!size.width||!size.height)return;
+ if(!CGSizeEqualToSize(size,self.view.guestSize)){
+  self.view.guestSize=size;[self sendGeometry];self.window.title=[NSString stringWithFormat:@"Googlebook • %.0f×%.0f",size.width,size.height];}
+ self.renderer.viewportScale=MIN(self.view.drawableSize.width/size.width,self.view.drawableSize.height/size.height);self.renderer.viewportOrigin=CGPointZero;
+}
 - (void)windowDidResize:(NSNotification *)n{[self fit];}
-- (void)resyncPointer:(id)sender{[self.view resync];}
 - (void)toggleFull:(id)sender{[self.window toggleFullScreen:nil];}
 - (void)connectSpice {
  NSString *hz=[NSString stringWithContentsOfFile:[[self.socketPath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"refresh"] encoding:NSUTF8StringEncoding error:nil];
  self.renderer.guestRefresh=hz.doubleValue;fprintf(stderr,"GUEST_REFRESH %.2f Hz screen %ld Hz\n",hz.doubleValue,(long)self.window.screen.maximumFramesPerSecond);
- self.connection=[[CSConnection alloc] initWithUnixSocketFile:[NSURL fileURLWithPath:self.socketPath]];self.connection.audioEnabled=NO;self.connection.session.shareClipboard=NO;self.connection.delegate=self;
+ self.connection=[[CSConnection alloc] initWithUnixSocketFile:[NSURL fileURLWithPath:self.socketPath]];self.connection.audioEnabled=NO;self.connection.delegate=self;
  [self.connection connect];
 }
 - (void)fail:(NSString *)message {
@@ -425,7 +392,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   if(self.densitySent){[timer invalidate];return;}
   // Once Android is up, match the display density to the resolution (the setting persists).
   NSData *log=[NSData dataWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"serial.log"]];
-  if(log&&[log rangeOfData:[@"VM_BOOT_COMPLETED" dataUsingEncoding:NSUTF8StringEncoding] options:0 range:NSMakeRange(0,log.length)].location!=NSNotFound){
+  if(log&&[[[NSString alloc] initWithData:log encoding:NSISOLatin1StringEncoding] rangeOfString:@"(^|\n)VM_BOOT_COMPLETED" options:NSRegularExpressionSearch].location!=NSNotFound){
    self.densitySent=YES;
    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
     NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
@@ -435,7 +402,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
    // undershoot slow moves and overshoot fast ones. Sent after the density verb has been handled.
    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(20*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
     NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
-    c.arguments=@[[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,@"VM_POINTER_ACCEL_OFF"];
+    c.arguments=@[@"-I",[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,@"VM_POINTER_ACCEL_OFF"];
     [c launchAndReturnError:nil];});
   }
  }];
@@ -448,10 +415,25 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 }
 // Control link to the helper in Android (guest/input). Any guest app can reach this port, so
 // both ends prove the token with an HMAC exchange (see Input.java) first.
+// Sends never block the main thread (it also delivers the mouse): what the socket won't take now
+// waits in ctlOut and goes when it drains. A helper that stops reading altogether is dropped.
 - (void)ctlSend:(NSString *)line {
  if(self.ctlFd<0)return;
- NSData *d=[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
- if(write(self.ctlFd,d.bytes,d.length)!=(ssize_t)d.length)[self ctlClose];
+ [self.ctlOut appendData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+ if(self.ctlOut.length>(8u<<20)){fprintf(stderr,"CONTROL dropped peer: not reading\n");[self ctlClose];return;}
+ if(!self.writeSource)[self ctlFlush];
+}
+- (void)ctlFlush {
+ while(self.ctlFd>=0&&self.ctlOut.length){
+  ssize_t n=write(self.ctlFd,self.ctlOut.bytes,self.ctlOut.length);
+  if(n>0){[self.ctlOut replaceBytesInRange:NSMakeRange(0,n) withBytes:NULL length:0];continue;}
+  if(n<0&&errno==EAGAIN){
+   if(!self.writeSource){dispatch_source_t ws=dispatch_source_create(DISPATCH_SOURCE_TYPE_WRITE,self.ctlFd,0,dispatch_get_main_queue());
+    dispatch_source_set_event_handler(ws,^{[self ctlFlush];});self.writeSource=ws;dispatch_resume(ws);}
+   return;}
+  [self ctlClose];return;
+ }
+ if(self.writeSource){dispatch_source_cancel(self.writeSource);self.writeSource=nil;}
 }
 // The Mac's battery changed (or a minute passed): tell the guest, which shows it as its own.
 - (void)sendBattery {if(self.ctlFd>=0)[self ctlSend:batteryLine()];}
@@ -462,6 +444,8 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  [NSTimer scheduledTimerWithTimeInterval:60 repeats:YES block:^(NSTimer *t){[self sendBattery];}];
 }
 - (void)ctlClose {
+ if(self.writeSource){dispatch_source_cancel(self.writeSource);self.writeSource=nil;}
+ [self.ctlOut setLength:0];
  if(self.readSource){dispatch_source_cancel(self.readSource);self.readSource=nil;} // the cancel handler closes the fd
  self.ctlFd=-1;
  self.view.absolute=NO;self.view.guestCursor=NO;[self.view resetTouchpad];[self.view setHostCursorHidden:NO];fprintf(stderr,"CONTROL disconnected\n");[self updateSubtitle];
@@ -516,8 +500,8 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  if(!self.settingsWindow){
   NSTextField *(^label)(NSString *)=^NSTextField *(NSString *t){NSTextField *l=[NSTextField labelWithString:t];l.alignment=NSTextAlignmentRight;return l;};
   self.pointerPopup=[self popup:@"PointerMode" titles:@[@"Captured mouse",@"Android cursor (experimental)",@"Mac cursor (experimental)"] values:@[@2,@0,@1]];
-  NSTextField *hint=[NSTextField labelWithString:@"Captured mouse: click to grab, ⌃⌥ to release. ⌃⌘M cycles modes."];hint.textColor=NSColor.secondaryLabelColor;hint.font=[NSFont systemFontOfSize:NSFont.smallSystemFontSize];
-  NSTextField *note=[NSTextField wrappingLabelWithString:@"Everything below applies the next time you start the VM."];note.textColor=NSColor.secondaryLabelColor;note.font=[NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+  NSTextField *hint=[self hint:@"Captured mouse: click to grab, ⌃⌥ to release. ⌃⌘M cycles modes."];
+  NSTextField *note=[self hint:@"Everything below applies the next time you start the VM."];
   NSGridView *grid=[NSGridView gridViewWithViews:@[
    @[label(@"Pointer:"),self.pointerPopup],
    @[[NSGridCell emptyContentView],hint],
@@ -588,7 +572,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
   [self.ctlPending addObject:rs];
   NSMutableData *buffer=[NSMutableData data];__block BOOL authed=NO;
   dispatch_source_set_event_handler(rs,^{
-   char buf[65536];ssize_t n=read(fd,buf,sizeof buf);if(n<=0){[self ctlDrop:rs];return;}
+   char buf[65536];ssize_t n=read(fd,buf,sizeof buf);if(n<0&&errno==EAGAIN)return;if(n<=0){[self ctlDrop:rs];return;}
    [buffer appendBytes:buf length:n];
    while(1){const char *b=buffer.bytes;const char *nl=memchr(b,'\n',buffer.length);if(!nl)break;
     NSString *line=[[NSString alloc] initWithBytes:b length:nl-b encoding:NSUTF8StringEncoding];
@@ -601,7 +585,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
     if(!got||got.length!=want.length||timingsafe_bcmp(got.bytes,want.bytes,want.length)){fprintf(stderr,"CONTROL rejected peer: bad token\n");[self ctlDrop:rs];return;}
     authed=YES;[self.ctlPending removeObject:rs];
     if(self.ctlFd>=0)[self ctlClose];
-    self.ctlFd=fd;self.readSource=rs;
+    self.ctlFd=fd;self.readSource=rs;self.ctlOut=[NSMutableData data];fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK);
     [self ctlSend:[@"A " stringByAppendingString:[self ctlHmac:[NSString stringWithFormat:@"gbos-host:%@:%@",p[1],hostNonce]]]];
     [self.view resetTouchpad];[self applyPointerMode];
     fprintf(stderr,"CONTROL connected\n");[self updateSubtitle];
@@ -620,8 +604,8 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
 }
 // Command V is the only time Mac clipboard text goes to the guest.
 - (void)pasteIntoGuest:(id)sender{
- if(self.ctlFd>=0){if([self pushClipboard])[self ctlSend:@"K 279"];else NSBeep();return;}
- NSBeep(); // no helper link yet, so there is nowhere to paste to
+ if(![self pushClipboard]){NSBeep();return;}  // no helper link yet, or nothing to paste
+ [self ctlSend:@"K 279"];
 }
 - (void)windowDidResignKey:(NSNotification *)n{[self.view releaseCapture];}
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender{return NO;}
@@ -632,7 +616,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
 - (void)spiceInputAvailable:(CSConnection *)c input:(CSInput *)i{dispatch_async(dispatch_get_main_queue(),^{self.view.input=i;[i requestMouseMode:YES];});}
 - (void)spiceInputUnavailable:(CSConnection *)c input:(CSInput *)i{dispatch_async(dispatch_get_main_queue(),^{[self.view releaseCapture];self.view.input=nil;});}
 - (void)spiceError:(CSConnection *)c code:(CSConnectionError)code message:(NSString *)message{fprintf(stderr,"SPICE error %s\n",message.UTF8String);dispatch_async(dispatch_get_main_queue(),^{self.window.subtitle=message;});}
-- (void)spiceDisplayCreated:(CSConnection *)c display:(CSDisplay *)d{dispatch_async(dispatch_get_main_queue(),^{self.display=d;[d addRenderer:self.renderer];[self fit];self.window.subtitle=self.view.seamless?@"⌘V pastes into guest • ⌃⌘F full screen • ⌃⌘R re-syncs pointer":@"Click to capture • ⌃⌥ releases";fprintf(stderr,"DISPLAY created %.0fx%.0f GL=%d\n",d.displaySize.width,d.displaySize.height,d.isGLEnabled);});}
+- (void)spiceDisplayCreated:(CSConnection *)c display:(CSDisplay *)d{dispatch_async(dispatch_get_main_queue(),^{self.display=d;[d addRenderer:self.renderer];[self fit];[self updateSubtitle];fprintf(stderr,"DISPLAY created %.0fx%.0f GL=%d\n",d.displaySize.width,d.displaySize.height,d.isGLEnabled);});}
 - (void)spiceDisplayUpdated:(CSConnection *)c display:(CSDisplay *)d{dispatch_async(dispatch_get_main_queue(),^{[self fit];});}
 - (void)spiceDisplayDestroyed:(CSConnection *)c display:(CSDisplay *)d{dispatch_async(dispatch_get_main_queue(),^{[d removeRenderer:self.renderer];self.display=nil;});}
 - (void)spiceAgentConnected:(CSConnection *)c supportingFeatures:(CSConnectionAgentFeature)f{}

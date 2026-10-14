@@ -452,7 +452,8 @@ static BOOL Debug(void) { static int on = -1; if (on < 0) on = getenv("GBOS_WEBC
   if (!_targetW) { _targetW = kFrames[_commit[3] - 1].w; _targetH = kFrames[_commit[3] - 1].h; }
   void (^begin)(void) = ^{
     dispatch_async(self->_captureQueue, ^{
-      if (self->_session) return;
+      // Stopped again while macOS asked for permission: don't turn the camera on for nobody
+      if (self->_session || !self->_capturing) return;
       AVCaptureDevice *dev = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
       AVCaptureDeviceInput *input = dev ? [AVCaptureDeviceInput deviceInputWithDevice:dev error:nil] : nil;
       if (!input) { NSLog(@"webcam: no Mac camera available"); return; }
