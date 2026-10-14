@@ -7,6 +7,7 @@
 #import "CSMetalRenderer.h"
 #import "webcam.h"
 #import "microphone.h"
+#import "bluetooth.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <netinet/tcp.h>
@@ -225,6 +226,7 @@ static unsigned short scan[128] = {
 @property(nonatomic) NSInteger guestDensity;
 @property(nonatomic,strong) GBWebcam *webcam;
 @property(nonatomic,strong) GBMicrophone *microphone;
+@property(nonatomic,strong) GBBluetoothRelay *bluetooth;
 @property(nonatomic,strong) dispatch_source_t selftest2;
 @property(nonatomic,strong) NSMutableData *ctlOut;          // queued for the guest helper
 @property(nonatomic,strong) dispatch_source_t writeSource;  // waits for room in the socket
@@ -268,7 +270,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  {NSUserDefaults *u=[NSUserDefaults standardUserDefaults];  // the network checkboxes became one choice
   if(![u objectForKey:@"Network"]&&([u objectForKey:@"Networking"]||[u objectForKey:@"IsolateNetwork"]))
    [u setObject:([u objectForKey:@"Networking"]&&![u boolForKey:@"Networking"])?@"off":[u boolForKey:@"IsolateNetwork"]?@"isolated":@"full" forKey:@"Network"];
-  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"Bluetooth",@"RefreshCap",@"Graphics",@"PointerMode"])[u removeObjectForKey:k];}
+  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"RefreshCap",@"Graphics",@"PointerMode"])[u removeObjectForKey:k];}
  [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES,@"AndroidTouchpad":@NO}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
@@ -383,13 +385,16 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   [args addObject:@"--microphone"];
   self.microphone=[[GBMicrophone alloc] initWithSocketPath:[self.runDir stringByAppendingPathComponent:@"mic.sock"]];[self.microphone start];
  }
+ // Android gets a virtual Bluetooth radio, and the BLE devices near this Mac appear on it
+ // (host/bluetooth.m) once run_vm.py reports the radio's port.
+ if([d boolForKey:@"Bluetooth"])[args addObject:@"--bluetooth"];
  // Pace the guest to the screen the window opens on (see guest_refresh in run_vm.py).
  [args addObjectsFromArray:@[@"--host-refresh",[NSString stringWithFormat:@"%g",screenRefresh(self.window.screen?:NSScreen.mainScreen)]]];
  NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];[args insertObject:@"-I" atIndex:0];t.arguments=args;
  t.standardOutput=[NSFileHandle fileHandleWithNullDevice];t.standardError=[NSFileHandle fileHandleWithNullDevice];
  __weak App *weak=self;
  t.terminationHandler=^(NSTask *x){dispatch_async(dispatch_get_main_queue(),^{
-  App *me=weak;if(!me||me.vmTask!=x)return;me.vmTask=nil;
+  App *me=weak;if(!me||me.vmTask!=x)return;me.vmTask=nil;[me.bluetooth stop];me.bluetooth=nil;
   if(me.quitting){
    // Restart: once Android is down and the runner has exited, open a fresh copy of the app.
    // A new instance also picks up any Settings that only apply at start.
@@ -410,7 +415,12 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
    if(tk.length)setenv("VM_INPUT_TOKEN",tk.UTF8String,1);
    self.socketPath=[self.runDir stringByAppendingPathComponent:@"spice.sock"];[self connectSpice];return;
   }
-  if(self.densitySent){[timer invalidate];return;}
+  if(!self.bluetooth&&[d boolForKey:@"Bluetooth"]){
+   NSString *port=[NSString stringWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"bluetooth-port"] encoding:NSUTF8StringEncoding error:nil];
+   if(port.intValue>0){self.bluetooth=[[GBBluetoothRelay alloc] initWithHCIPort:port.intValue log:[self.runDir stringByAppendingPathComponent:@"bluetooth.log"]];[self.bluetooth start];}
+  }
+  if(self.densitySent&&(self.bluetooth||![d boolForKey:@"Bluetooth"]||[fm fileExistsAtPath:[self.runDir stringByAppendingPathComponent:@"bluetooth-none"]])){[timer invalidate];return;}
+  if(self.densitySent)return;
   // Once Android is up, match the display density to the resolution (the setting persists).
   NSData *log=[NSData dataWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"serial.log"]];
   if(log&&[[[NSString alloc] initWithData:log encoding:NSISOLatin1StringEncoding] rangeOfString:@"(^|\n)VM_BOOT_COMPLETED" options:NSRegularExpressionSearch].location!=NSNotFound){
@@ -530,7 +540,8 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
    @[label(@"Network:"),[self popup:@"Network" titles:@[@"Internet",@"Isolated from this Mac (no internet or Mac services)",@"Off (also no pointer or clipboard link)"] values:@[@"full",@"isolated",@"off"]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Audio" title:@"Audio output"]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Camera" title:@"Camera (Android sees this Mac's camera as a USB webcam)"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Microphone" title:@"Microphone (Android hears this Mac's microphone as a USB mic)"]]]];
+   @[[NSGridCell emptyContentView],[self checkbox:@"Microphone" title:@"Microphone (Android hears this Mac's microphone as a USB mic)"]],
+   @[[NSGridCell emptyContentView],[self checkbox:@"Bluetooth" title:@"Bluetooth (experimental: Android sees the Bluetooth LE devices near this Mac)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
   NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,470) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
@@ -624,7 +635,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
 - (void)windowDidResignKey:(NSNotification *)n{[self.view releaseCapture];}
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender{return NO;}
 - (void)windowWillClose:(NSNotification *)n{if(n.object==self.window)[NSApp terminate:nil];}
-- (void)applicationWillTerminate:(NSNotification *)n{[self.view releaseCapture];[self.connection disconnect];}
+- (void)applicationWillTerminate:(NSNotification *)n{[self.bluetooth stop];[self.view releaseCapture];[self.connection disconnect];}
 - (void)spiceConnected:(CSConnection *)c{fprintf(stderr,"SPICE connected\n");}
 - (void)spiceDisconnected:(CSConnection *)c{dispatch_async(dispatch_get_main_queue(),^{[self.view releaseCapture];self.window.subtitle=@"VM disconnected";});}
 - (void)spiceInputAvailable:(CSConnection *)c input:(CSInput *)i{dispatch_async(dispatch_get_main_queue(),^{self.view.input=i;[i requestMouseMode:YES];});}

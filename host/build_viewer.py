@@ -24,11 +24,13 @@ for name in ('run_vm.py', 'vm_control.py'):
     'NSCameraUsageDescription': 'Android in the VM uses this Mac’s camera as a USB webcam. '
                                 'It only runs while an Android app is using the camera.',
     'NSMicrophoneUsageDescription': 'Android in the VM uses this Mac’s microphone as a USB microphone. '
-                                    'It only runs while an Android app is recording.'}))
+                                    'It only runs while an Android app is recording.',
+    'NSBluetoothAlwaysUsageDescription': 'Android in the VM sees the Bluetooth LE devices near this Mac, '
+                                         'and its apps connect to them through it.'}))
 skip = {'CSUSBDevice.m', 'CSUSBManager.m', 'CSSession+Sharing.m', 'gst_ios_init.m'}
 sources = [str(p) for p in sorted((S / 'CocoaSpice').glob('*.m')) if p.name not in skip]
 sources += [str(S / 'CocoaSpiceRenderer/CSMetalRenderer.m'), str(viewer_m), str(viewer_m.parent / 'webcam.m'),
-            str(viewer_m.parent / 'microphone.m')]
+            str(viewer_m.parent / 'microphone.m'), str(viewer_m.parent / 'bluetooth.m')]
 cmd = ['clang', '-fobjc-arc', '-fblocks', '-fmodules', f'-fmodules-cache-path={build}/module-cache', '-O2',
        '-Wno-incomplete-implementation', '-w']
 headers = S / 'CocoaSpice/ExternalHeaders'
@@ -37,7 +39,7 @@ for p in [build / 'modules', S / 'CocoaSpice/include', S / 'CocoaSpice', S / 'Co
     cmd += ['-I', str(p)]
 cmd += sources
 for n in ('AppKit', 'Metal', 'MetalKit', 'CoreGraphics', 'CoreImage', 'IOSurface', 'CoreVideo', 'IOKit',
-          'AVFoundation', 'CoreMedia', 'ImageIO'):
+          'AVFoundation', 'CoreMedia', 'ImageIO', 'CoreBluetooth'):
     cmd += ['-framework', n]
 for n in ('spice-client-glib-2.0.8', 'glib-2.0.0', 'gobject-2.0.0', 'gio-2.0.0', 'gstreamer-1.0.0'):
     cmd.append(str(frameworks / (n + '.framework') / n))

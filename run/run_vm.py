@@ -14,10 +14,11 @@ On stop, Android is asked to power off through the guest control channel before 
 Graphics are gfxstream (build-gfxstream.sh): Android's Vulkan and GLES (ANGLE) run on the Mac's
 GPU through MoltenVK, and frames reach the viewer without a copy through the CPU.
 
---bluetooth (for development): if the Android emulator's netsimd is installed (SDK "emulator"
-package, or set GBOS_NETSIMD), start it as a virtual Bluetooth controller and tell Android it has
-Bluetooth. It is a simulated radio with nothing real to pair with; without it the guest boots with
-no Bluetooth at all.
+--bluetooth: if the Android emulator's netsimd is installed (SDK "emulator" package, or set
+GBOS_NETSIMD), start it as a virtual Bluetooth controller and tell Android it has Bluetooth. Its
+raw HCI port is written to WORK/logs/RUN_NAME/bluetooth-port, where the viewer's relay picks it
+up to show Android the BLE devices near the Mac (host/bluetooth.m); without the viewer it is a
+simulated radio with nothing on it. Without netsimd the guest boots with no Bluetooth at all.
 
 --webcam adds a usb-redir port on WORK/logs/RUN_NAME/webcam.sock; the viewer app connects to it
 and plugs in a USB camera backed by the Mac's camera (host/webcam.m). Nothing is plugged in until
@@ -196,6 +197,8 @@ def main():
         netsim, bt_port = start_netsimd(netsimd, out)
         cmdline += ' androidboot.product.vendor.sku=vmbt'
     print('bluetooth:', f'virtual controller ({netsimd})' if netsimd else 'none', flush=True)
+    # For the viewer, whose Bluetooth relay joins the same virtual radio (host/bluetooth.m)
+    if args.bluetooth: (out / ('bluetooth-port' if netsim else 'bluetooth-none')).write_text(f'{bt_port}\n' if netsim else '')
 
     cmd = [str(host / 'qemu-interop'), '-nodefaults', '-vga', 'none',
            '-nic', 'none', '-device', gpu + ',hostmem=8G,gfxstream-vulkan=on' + os.environ.get('GBOS_GFXSTREAM_DEVICE', ''),
