@@ -44,6 +44,10 @@ CMDLINE = ('console=ttyAMA0,115200 earlycon=pl011,0x9000000 panic=0 root=/dev/ra
            'androidboot.vbmeta.digest=9118d58c024a0b43fef17a1dcdf6b999b5ea9cbc053fd4377d5d78c445b15692 '
            'androidboot.vbmeta.device_state=unlocked androidboot.verifiedbootstate=orange '
            'androidboot.veritymode=enforcing printk.devkmsg=on '
+           # "false", not "0": the same to everything that reads it, but it doesn't match the
+           # trigger that starts the non-secure Trusty security VM, which can't run here (its
+           # command line needs a property only real hardware sets) and restarted every second
+           'androidboot.hypervisor.protected_vm.supported=false '
            'androidboot.vendor.apex.com.android.hardware.keymint.strongbox.desktop=none '
            'androidboot.vendor.apex.com.android.hardware.audio.desktop=none loglevel=3')
 
