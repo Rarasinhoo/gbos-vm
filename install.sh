@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build everything from source and leave a runnable Googlebook VM in $GOOGLEBOOK_WORK (default ./work).
-# Run:  ./install.sh     then:  python3 run/launch.py work
+# Run:  ./install.sh     then:  open "work/host/Googlebook VM.app"
 . "$(dirname "$0")/lib.sh"
 [ "$(uname -m)" = arm64 ] || die "Apple Silicon Mac required"
 "$ROOT/prereqs.sh"

@@ -641,9 +641,6 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
 - (void)spiceForwardedPortClosed:(CSConnection *)c port:(CSPort *)p{}
 @end
 int main(int argc,char **argv){@autoreleasepool {
- // For launch.py, which starts the VM before this window exists: the main screen's refresh rate
- // and the Android density for a guest WIDTH pixels wide on it.
- if(argc==3&&!strcmp(argv[1],"--screen")){printf("%g %ld\n",screenRefresh(NSScreen.mainScreen),(long)guestDensity(atol(argv[2]),NSScreen.mainScreen));return 0;}
  if(argc>3){fprintf(stderr,"Usage: GooglebookViewer [/absolute/path/to/spice.sock [--fullscreen]]\n");return 2;}
  NSApplication *app=[NSApplication sharedApplication];[app setActivationPolicy:NSApplicationActivationPolicyRegular];
  // Menu bar. Actions have no target, so they reach the app delegate through the responder chain.

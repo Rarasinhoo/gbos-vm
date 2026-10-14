@@ -73,7 +73,7 @@ After a `git pull`, rebuild the app and refresh the system part of your disk. Qu
 
 `update-image.sh` keeps your data — it only replaces the system area, and it leaves the previous disk next to the new one as `googlebook.raw.before-update` in case something goes wrong.
 
-If you'd rather drive it from a terminal, `python3 run/launch.py work` does the same thing and takes `--display 1920x1200` and `--fullscreen`.
+If you'd rather start it from a terminal, `python3 run/launch.py work` opens the app and waits for it to quit; `--display 1920x1200` and `--fullscreen` set those options first.
 
 ### Pointer modes
 

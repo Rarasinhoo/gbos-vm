@@ -74,24 +74,19 @@ def start_netsimd(binary, out):
 
 def qemu_at_refresh(base, hz):
     """A copy of QEMU's library whose display description (EDID) says hz instead of 75 Hz, or
-    None if this QEMU build doesn't look like the one we know how to change.
+    None if this QEMU build doesn't look like the one we know how to change (a new QEMU version).
 
     qemu_edid_generate() uses `info->refresh_rate ?: 75000` (millihertz), and nothing in this
     setup ever fills refresh_rate in. The fallback is two instructions, MOVZ/MOVK Wd building
     75000, right before the CSEL that picks it; we rewrite their immediates. The copy sits beside
-    the original (it finds the patched renderer via @loader_path), is ad-hoc signed like the
-    original, and is kept for the next boot at the same rate."""
+    the original, is ad-hoc signed like it, and is kept for the next boot at the same rate."""
     mhz = round(hz * 1000)
     if mhz == 75000: return base
     out = base.with_name(f'{base.name}-{mhz}mhz')
     if out.exists() and out.stat().st_mtime >= base.stat().st_mtime: return out
     tmp = out.with_suffix('.tmp')
     try:
-        if b'arm64' in subprocess.run(['/usr/bin/lipo', '-archs', str(base)], capture_output=True).stdout and \
-           subprocess.run(['/usr/bin/lipo', '-info', str(base)], capture_output=True, text=True).stdout.startswith('Architectures in the fat'):
-            subprocess.run(['/usr/bin/lipo', '-thin', 'arm64', str(base), '-output', str(tmp)], check=True, capture_output=True)
-        else:  # already arm64 only (our own build)
-            shutil.copyfile(base, tmp)
+        shutil.copyfile(base, tmp)
         code = bytearray(tmp.read_bytes())
         word = lambda o: int.from_bytes(code[o:o + 4], 'little')
         sites = [o for o in range(0, len(code) - 16, 4)
@@ -107,28 +102,18 @@ def qemu_at_refresh(base, hz):
         tmp.rename(out)
         return out
     except (OSError, subprocess.CalledProcessError, ValueError) as e:
-        print(f'cannot set the guest refresh rate in this QEMU ({e}); using 60 or 75 Hz', flush=True)
+        print(f'cannot set the guest refresh rate in this QEMU ({e}); using 75 Hz', flush=True)
         tmp.unlink(missing_ok=True)
         return None
 
 
-def guest_refresh(host_hz, any_rate=True, cap=120):
-    """The guest refresh rate that paces best on a host_hz screen. With a QEMU we can patch
-    (any_rate), that is the largest whole fraction of the screen's rate up to cap (with the default
-    120: 120 -> 120, 144 -> 72; with 75: 120 -> 60), so every frame stays up for the same number of
-    refreshes; a screen up to 90 Hz that would drop below 50 that way (85 -> 42.5 under a 75 cap)
-    keeps its own rate instead. A lower cap lightens the guest: at native resolution and 120 Hz,
-    2-4% of frames miss their deadline while scrolling, against about 0.5% at 60-85 Hz.
-    Otherwise only 60 Hz (no EDID: the guest driver's own 59.95 Hz mode) and 75 Hz (QEMU's EDID)
-    are on offer: a screen that is a whole multiple of one shows every frame for the same time,
-    and failing that the rate with fewer uneven frames per second (the beat against the nearest
-    multiple) wins."""
-    if any_rate:
-        fits = [host_hz / k for k in range(1, 9) if host_hz / k <= cap + 1e-6]
-        best = fits[0] if fits else cap
-        return best if best >= 50 or host_hz > 90 else host_hz
-    beat = lambda r: min(abs(host_hz - k * r) for k in range(1, 5))
-    return min((60, 75), key=lambda r: beat(59.95 if r == 60 else 75))
+def guest_refresh(host_hz, cap=120):
+    """The guest refresh rate that paces best on a host_hz screen: the largest whole fraction of
+    the screen's rate up to cap (120 -> 120, 144 -> 72), so every frame stays up for the same
+    number of refreshes. A screen up to 90 Hz that would drop below 50 that way keeps its own rate."""
+    fits = [host_hz / k for k in range(1, 9) if host_hz / k <= cap + 1e-6]
+    best = fits[0] if fits else cap
+    return best if best >= 50 or host_hz > 90 else host_hz
 
 
 def send_token(proc, out, token, host_addr):
@@ -159,7 +144,7 @@ def send_token(proc, out, token, host_addr):
 def main():
     a = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     a.add_argument('work'); a.add_argument('name')
-    a.add_argument('--seconds', type=int, default=3600)
+    a.add_argument('--seconds', type=int, help='power the VM off after this long (default: run until stopped)')
     a.add_argument('--snapshot', action='store_true'); a.add_argument('--offline', action='store_true')
     a.add_argument('--isolated', action='store_true')
     a.add_argument('--no-audio', action='store_true'); a.add_argument('--bluetooth', action='store_true')
@@ -171,7 +156,8 @@ def main():
     a.add_argument('--image', help='image folder (default WORK/image)')
     args = a.parse_args()
     work = Path(args.work).resolve()
-    assert args.name.replace('-', '').replace('_', '').isalnum() and 10 <= args.seconds <= 86400
+    if not args.name.replace('-', '').replace('_', '').isalnum(): a.error('RUN_NAME: letters, digits, - and _ only')
+    if args.seconds is not None and not 10 <= args.seconds <= 86400: a.error('--seconds: 10 to 86400')
     image = Path(args.image).resolve() if args.image else work / 'image'
     if not (image / 'gfxstream.json').exists():
         sys.exit(f'{image} was built for the old virgl graphics; run ./update-image.sh (your data stays)')
@@ -181,22 +167,21 @@ def main():
     for p in (host / 'qemu-interop', image / 'googlebook.raw', image / 'initrd.img', image / 'kernel.Image', utm / 'Contents/Frameworks'):
         if not p.exists(): sys.exit(f'missing: {p}')
     width, height = args.display.split('x')
-    refresh = args.refresh or (guest_refresh(args.host_refresh) if args.host_refresh else 75)
-    # Our own QEMU build (UTM's has no rutabaga device). The launcher loads only from its own
-    # folder, so keep a copy of it there.
-    base = host / 'qemu-gfx-aarch64-softmmu'
-    if not base.exists() or base.stat().st_mtime < built.stat().st_mtime:
-        shutil.copyfile(built, base.with_suffix('.tmp')); base.with_suffix('.tmp').rename(base)
-    qemu, edid = qemu_at_refresh(base, refresh), True
-    if qemu is None:  # an unknown QEMU build: fall back to the two rates it offers unmodified
-        refresh = guest_refresh(args.host_refresh or refresh, any_rate=False)
-        qemu, edid = base, refresh != 60
-        if not edid: refresh = 59.95
-    print(f'guest refresh: {refresh:g} Hz' + (f' (Mac screen {args.host_refresh:g} Hz)' if args.host_refresh else ''), flush=True)
+    # One VM per folder: the lock is held by QEMU too (pass_fds below), so it lasts as long as the disk is in use
     (work / 'logs').mkdir(exist_ok=True)
     lock = (work / 'logs/vm.lock').open('a')
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: sys.exit('another VM from this folder is already running')
+    refresh = args.refresh or (guest_refresh(args.host_refresh) if args.host_refresh else 75)
+    # Our own QEMU build (UTM's has no rutabaga device). The launcher loads only from its own
+    # folder, so keep a copy of it there; copies at other refresh rates go stale with it.
+    base = host / 'qemu-gfx-aarch64-softmmu'
+    if not base.exists() or base.stat().st_mtime < built.stat().st_mtime:
+        for old in host.glob(base.name + '-*mhz'): old.unlink()
+        shutil.copyfile(built, base.with_suffix('.tmp')); base.with_suffix('.tmp').rename(base)
+    qemu = qemu_at_refresh(base, refresh)
+    if qemu is None: qemu, refresh = base, 75
+    print(f'guest refresh: {refresh:g} Hz' + (f' (Mac screen {args.host_refresh:g} Hz)' if args.host_refresh else ''), flush=True)
     # Private: holds the token and the QMP, SPICE and serial sockets.
     out = work / 'logs' / args.name; out.mkdir(mode=0o700)
     # Random per-boot secret for the pointer/clipboard link (see guest/input).
@@ -215,7 +200,6 @@ def main():
     cmd = [str(host / 'qemu-interop'), '-L', str(utm / 'Contents/Resources/qemu'), '-nodefaults', '-vga', 'none',
            '-nic', 'none', '-device', gpu + ',hostmem=8G,gfxstream-vulkan=on' + os.environ.get('GBOS_GFXSTREAM_DEVICE', ''),
            '-global', f'{gpu}.xres={width}', '-global', f'{gpu}.yres={height}',
-           *([] if edid else ['-global', f'{gpu}.edid=off']),
            '-cpu', 'host', '-smp', f'cpus={args.cpus},sockets=1,cores={args.cpus},threads=1',
            '-machine', 'virt,gic-version=3,highmem=on,highmem-ecam=off', '-accel', 'hvf,ipa-granule-size=0x1000',
            '-m', str(args.memory), '-audio', 'none',
@@ -264,7 +248,8 @@ def main():
     env.pop('APP_SANDBOX_GROUP_ID', None)
     (out / 'command.json').write_text(json.dumps({'command': cmd, 'seconds': args.seconds}, indent=2))
     with (out / 'host.log').open('wb') as log:
-        proc = subprocess.Popen(cmd, cwd=out, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen(cmd, cwd=out, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                                pass_fds=(lock.fileno(),))
         print('PID', proc.pid, 'logs', out, flush=True)
         threading.Thread(target=send_token, args=(proc, out, token, '10.0.2.100' if args.isolated else '10.0.2.2'), daemon=True).start()
         def interrupt(signum, frame): raise KeyboardInterrupt
@@ -273,6 +258,7 @@ def main():
         try: rc = proc.wait(timeout=args.seconds)
         except (subprocess.TimeoutExpired, KeyboardInterrupt): pass
         finally:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)  # a second stop request must not cut this short
             if proc.poll() is None:
                 try:
                     vm_control.send(out, 'VM_POWEROFF'); rc = proc.wait(timeout=30)
@@ -284,6 +270,7 @@ def main():
             if netsim and netsim.poll() is None:
                 try: netsim.wait(timeout=3)
                 except subprocess.TimeoutExpired: os.killpg(netsim.pid, signal.SIGTERM)
+        (out / 'token').unlink(missing_ok=True)
         (out / 'result.json').write_text(json.dumps({'exit_code': rc}))
         print('exit', rc, flush=True)
 

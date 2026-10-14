@@ -36,10 +36,10 @@ def main():
     image = sys.argv[sys.argv.index('--image') + 1]
     display = sys.argv[sys.argv.index('--display') + 1] if '--display' in sys.argv else '1920x1200'
     refresh = ['--refresh', sys.argv[sys.argv.index('--refresh') + 1]] if '--refresh' in sys.argv else []
-    refresh += ['--cpus', sys.argv[sys.argv.index('--cpus') + 1]] if '--cpus' in sys.argv else []
+    cpus = ['--cpus', sys.argv[sys.argv.index('--cpus') + 1]] if '--cpus' in sys.argv else []
     run = work / 'logs' / name
     vm = subprocess.Popen([sys.executable, str(HERE / 'run/run_vm.py'), str(work), name, '--seconds', '900', '--image', image,
-                           '--snapshot', '--no-audio', '--display', display] + refresh,
+                           '--snapshot', '--no-audio', '--display', display] + refresh + cpus,
                           stdout=subprocess.DEVNULL, start_new_session=True)
     deadline = time.monotonic() + 30
     while not (run / 'spice.sock').exists():
