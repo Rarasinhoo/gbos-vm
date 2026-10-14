@@ -22,7 +22,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-static const NSUInteger kMaxMirrors = 16;
+static const NSUInteger kMaxMirrors = 16, kMaxMirrorsWithPhones = 32;
 static const NSTimeInterval kForgetAfter = 60;   // seconds without an advertisement
 static const uint16_t kServerMTU = 247;
 
@@ -79,13 +79,14 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 
 #pragma mark - One twin: a virtual controller acting as one real device
 
-@class GBBluetoothRelay;
+@class GBBluetoothRelay, GBListener;
 @interface GBMirror : NSObject<CBPeripheralDelegate>
 @property(nonatomic,strong) CBPeripheral *peripheral;
 @property(nonatomic,strong) NSDictionary *advertisement;
 @property(nonatomic) NSTimeInterval lastSeen;
 @property(nonatomic,weak) GBBluetoothRelay *relay;
 - (BOOL)openOnPort:(int)port queue:(dispatch_queue_t)q;
+- (NSData *)address;
 - (void)updateAdvertisement:(NSDictionary *)ad;
 - (BOOL)connected;
 - (void)close;
@@ -93,12 +94,18 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 - (void)macDisconnected:(nullable NSError *)error;
 @end
 
-@interface GBBluetoothRelay ()<CBCentralManagerDelegate>
+@interface GBBluetoothRelay ()<CBCentralManagerDelegate,CBPeripheralManagerDelegate>
 @property(nonatomic) int port;
+@property(nonatomic) BOOL phones;
 @property(nonatomic,strong) dispatch_queue_t queue;
 @property(nonatomic,strong,nullable) CBCentralManager *central;
 @property(nonatomic,strong) NSMutableDictionary<NSUUID *,GBMirror *> *mirrors;
 @property(nonatomic,strong,nullable) dispatch_source_t sweep;
+@property(nonatomic,strong,nullable) CBPeripheralManager *advertiser;
+@property(nonatomic,strong,nullable) GBListener *listener;
+@property(nonatomic,strong,nullable) NSDictionary *advertising;   // what the Mac advertises for Android
+- (void)androidAdvertises:(nullable NSString *)name services:(NSArray<CBUUID *> *)services;
+- (NSSet<NSData *> *)twinAddresses;
 - (void)connectMac:(GBMirror *)m;
 - (void)disconnectMac:(GBMirror *)m;
 @end
@@ -489,12 +496,113 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 }
 @end
 
+#pragma mark - The other way: what Android advertises, from the Mac
+
+// One more controller on the VM's radio, only listening. Every advertisement on it that isn't
+// one of the twins' comes from Android, and the Mac advertises it in turn through its own
+// radio, as far as macOS lets an app: a name and service UUIDs, no service or maker data.
+@interface GBListener : NSObject
+@property(nonatomic,weak) GBBluetoothRelay *relay;
+- (BOOL)openOnPort:(int)port queue:(dispatch_queue_t)q;
+- (void)close;
+@end
+@implementation GBListener {
+ int _fd;
+ dispatch_source_t _read;
+ NSMutableData *_in;
+ NSMutableArray<NSData *> *_commands;
+ BOOL _commandOut;
+ NSString *_name;
+ NSMutableOrderedSet<CBUUID *> *_services;
+ NSMutableSet<NSString *> *_dropped;   // advertisement types macOS can't carry, logged once
+ NSTimeInterval _lastHeard;
+ dispatch_source_t _tick;
+}
+- (BOOL)openOnPort:(int)port queue:(dispatch_queue_t)q {
+ _fd=socket(AF_INET,SOCK_STREAM,0);_in=[NSMutableData data];_commands=[NSMutableArray array];
+ _services=[NSMutableOrderedSet orderedSet];_dropped=[NSMutableSet set];
+ struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
+ if(_fd<0||connect(_fd,(struct sockaddr *)&a,sizeof a)){if(_fd>=0)close(_fd);_fd=-1;return NO;}
+ int one=1;setsockopt(_fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one);
+ int fd=_fd;__weak GBListener *weak=self;
+ _read=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,fd,0,q);
+ dispatch_source_set_event_handler(_read,^{uint8_t buf[4096];ssize_t n=read(fd,buf,sizeof buf);GBListener *l=weak;if(!l)return;
+  if(n<=0){if(n<0&&errno==EAGAIN)return;[l close];return;}[l received:buf length:n];});
+ dispatch_source_set_cancel_handler(_read,^{close(fd);});
+ dispatch_resume(_read);
+ // Reset; LE events; passive scan, every advertisement (no duplicate filtering)
+ [self command:0x0c03 params:nil];
+ [self command:0x0c01 params:[NSData dataWithBytes:(uint8_t[]){0xff,0xff,0xff,0xff,0xff,0xff,0xbf,0x3d} length:8]];
+ [self command:0x2001 params:[NSData dataWithBytes:(uint8_t[]){0x1f,0,0,0,0,0,0,0} length:8]];
+ NSMutableData *sp=[NSMutableData data];put8(sp,0);put16(sp,0x30);put16(sp,0x30);put8(sp,0);put8(sp,0);[self command:0x200b params:sp];
+ [self command:0x200c params:[NSData dataWithBytes:(uint8_t[]){1,0} length:2]];
+ // What Android stopped advertising, the Mac stops advertising too
+ _tick=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,q);
+ dispatch_source_set_timer(_tick,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),2*NSEC_PER_SEC,NSEC_PER_SEC/4);
+ dispatch_source_set_event_handler(_tick,^{GBListener *l=weak;if(!l)return;
+  if(CFAbsoluteTimeGetCurrent()-l->_lastHeard>10){l->_name=nil;[l->_services removeAllObjects];}
+  [l.relay androidAdvertises:l->_name services:l->_services.array];});
+ dispatch_resume(_tick);
+ return YES;
+}
+- (void)close {
+ if(_tick){dispatch_source_cancel(_tick);_tick=nil;}
+ if(_read){dispatch_source_cancel(_read);_read=nil;}
+ _fd=-1;
+}
+- (void)command:(uint16_t)op params:(nullable NSData *)params {
+ NSMutableData *d=[NSMutableData dataWithBytes:(uint8_t[]){1} length:1];put16(d,op);put8(d,(uint8_t)params.length);if(params)[d appendData:params];
+ [_commands addObject:d];[self pump];
+}
+- (void)pump {
+ if(_commandOut||!_commands.count||_fd<0)return;
+ _commandOut=YES;NSData *d=_commands.firstObject;[_commands removeObjectAtIndex:0];
+ if(write(_fd,d.bytes,d.length)!=(ssize_t)d.length)[self close];
+}
+- (void)received:(const uint8_t *)b length:(size_t)n {
+ [_in appendBytes:b length:n];
+ while(_in.length>=3){
+  const uint8_t *p=_in.bytes;
+  if(p[0]!=4){[_in setLength:0];return;}
+  size_t need=3+p[2];if(_in.length<need)return;
+  if(p[1]==0x0e||p[1]==0x0f){_commandOut=NO;[self pump];}
+  else if(p[1]==0x3e&&p[2]>=2&&p[3]==0x02)[self reports:p+4 length:need-4];
+  [_in replaceBytesInRange:NSMakeRange(0,need) withBytes:NULL length:0];
+ }
+}
+- (void)reports:(const uint8_t *)p length:(size_t)len {
+ if(len<1)return;
+ NSSet<NSData *> *twins=[self.relay twinAddresses];
+ size_t q=1;
+ for(uint8_t i=0;i<p[0]&&q+9<=len;i++){
+  NSData *addr=[NSData dataWithBytes:p+q+2 length:6];uint8_t dl=p[q+8];
+  if(q+9+dl>len)return;
+  const uint8_t *d=p+q+9;
+  if(![twins containsObject:addr]){
+   _lastHeard=CFAbsoluteTimeGetCurrent();
+   for(size_t k=0;k+1<dl&&d[k];k+=d[k]+1){
+    uint8_t n=d[k],t=d[k+1];const uint8_t *v=d+k+2;size_t vl=n-1;
+    if(k+1+n>dl)break;
+    if(t==0x08||t==0x09)_name=[[NSString alloc] initWithBytes:v length:vl encoding:NSUTF8StringEncoding];
+    else if(t==0x02||t==0x03)for(size_t j=0;j+1<vl;j+=2)[_services addObject:uuidFrom(v+j,2)];
+    else if(t==0x06||t==0x07)for(size_t j=0;j+15<vl;j+=16)[_services addObject:uuidFrom(v+j,16)];
+    else if(t!=0x01&&t!=0x0a){
+     NSString *what=t==0x16&&vl>=2?[NSString stringWithFormat:@"service data %@",uuidFrom(v,2).UUIDString]:t==0xff&&vl>=2?[NSString stringWithFormat:@"maker data %04x",get16(v)]:[NSString stringWithFormat:@"type %02x",t];
+     if(![_dropped containsObject:what]){[_dropped addObject:what];GBLog(@"Android advertises %@, which macOS won't let the Mac advertise",what);}
+    }
+   }
+  }
+  q+=10+dl;
+ }
+}
+@end
+
 #pragma mark - The relay: CoreBluetooth's view of the neighbourhood
 
 @implementation GBBluetoothRelay
-- (instancetype)initWithHCIPort:(int)port log:(NSString *)path {
+- (instancetype)initWithHCIPort:(int)port log:(NSString *)path phones:(BOOL)phones {
  if(!logFile)logFile=fopen(path.fileSystemRepresentation,"a");
- if((self=[super init])){_port=port;_queue=dispatch_queue_create("bluetooth relay",DISPATCH_QUEUE_SERIAL);_mirrors=[NSMutableDictionary dictionary];}
+ if((self=[super init])){_phones=phones;_port=port;_queue=dispatch_queue_create("bluetooth relay",DISPATCH_QUEUE_SERIAL);_mirrors=[NSMutableDictionary dictionary];}
  return self;
 }
 - (void)start {
@@ -505,7 +613,31 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
   dispatch_source_set_timer(self.sweep,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC),10*NSEC_PER_SEC,NSEC_PER_SEC);
   dispatch_source_set_event_handler(self.sweep,^{[self forgetStale];});
   dispatch_resume(self.sweep);
+  self.listener=[GBListener new];self.listener.relay=self;
+  if(![self.listener openOnPort:self.port queue:self.queue])self.listener=nil;
+  self.advertiser=[[CBPeripheralManager alloc] initWithDelegate:self queue:self.queue options:@{CBPeripheralManagerOptionShowPowerAlertKey:@NO}];
  });
+}
+- (NSSet<NSData *> *)twinAddresses {
+ NSMutableSet *s=[NSMutableSet set];
+ // Advertising reports carry addresses least significant byte first, as the twins set them
+ for(GBMirror *m in self.mirrors.allValues)[s addObject:m.address];
+ return s;
+}
+- (void)peripheralManagerDidUpdateState:(CBPeripheralManager *)p {
+ if(p.state==CBManagerStatePoweredOn&&self.advertising)[p startAdvertising:self.advertising];
+}
+- (void)androidAdvertises:(NSString *)name services:(NSArray<CBUUID *> *)services {
+ NSMutableDictionary *ad=[NSMutableDictionary dictionary];
+ if(name.length)ad[CBAdvertisementDataLocalNameKey]=name;
+ if(services.count)ad[CBAdvertisementDataServiceUUIDsKey]=services;
+ if(!ad.count)ad=nil;
+ if((ad==nil&&self.advertising==nil)||[ad isEqualToDictionary:self.advertising])return;
+ self.advertising=ad;
+ if(self.advertiser.state!=CBManagerStatePoweredOn)return;
+ [self.advertiser stopAdvertising];
+ if(ad){[self.advertiser startAdvertising:ad];GBLog(@"the Mac advertises for Android: %@%lu services",name.length?@"its name, ":@"",(unsigned long)services.count);}
+ else GBLog(@"Android stopped advertising");
 }
 - (void)stop {
  dispatch_sync(self.queue,^{
@@ -513,6 +645,8 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
   [self.central stopScan];
   for(GBMirror *m in self.mirrors.allValues){[m close];if(m.peripheral.state!=CBPeripheralStateDisconnected)[self.central cancelPeripheralConnection:m.peripheral];}
   [self.mirrors removeAllObjects];self.central.delegate=nil;self.central=nil;
+  [self.listener close];self.listener=nil;
+  [self.advertiser stopAdvertising];self.advertiser.delegate=nil;self.advertiser=nil;
  });
 }
 - (void)centralManagerDidUpdateState:(CBCentralManager *)c {
@@ -525,18 +659,20 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 // their own device-to-device features: Apple's (0x004C) or Microsoft's (0x0006) maker data, or
 // Google's Quick Share and Nearby services. They are other people's machines more often than
 // not, and nothing an Android app pairs with.
-static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p) {
+// With phones on (Settings: your own Android phone, for Quick Share and Better Together),
+// Google's device-to-device services are relayed too; Apple's and Microsoft's never are.
+static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
  NSData *m=ad[CBAdvertisementDataManufacturerDataKey];
  uint16_t company=m.length>=2?get16(m.bytes):0xffff;
  if(company==0x004c||company==0x0006)return NO;
  NSArray<CBUUID *> *sharing=@[[CBUUID UUIDWithString:@"FCF1"],[CBUUID UUIDWithString:@"FEF3"],[CBUUID UUIDWithString:@"FE9F"]];
- for(CBUUID *u in sharing)if([ad[CBAdvertisementDataServiceUUIDsKey] containsObject:u]||ad[CBAdvertisementDataServiceDataKey][u])return NO;
+ for(CBUUID *u in sharing)if([ad[CBAdvertisementDataServiceUUIDsKey] containsObject:u]||ad[CBAdvertisementDataServiceDataKey][u])return phones;
  return [ad[CBAdvertisementDataLocalNameKey] length]||p.name.length||[ad[CBAdvertisementDataServiceUUIDsKey] count]||[ad[CBAdvertisementDataServiceDataKey] count]||m.length>=2;
 }
 - (void)centralManager:(CBCentralManager *)c didDiscoverPeripheral:(CBPeripheral *)p advertisementData:(NSDictionary *)ad RSSI:(NSNumber *)rssi {
  GBMirror *m=self.mirrors[p.identifier];
  if(!m){
-  if(!worthRelaying(ad,p)||self.mirrors.count>=kMaxMirrors)return;
+  if(!worthRelaying(ad,p,self.phones)||self.mirrors.count>=(self.phones?kMaxMirrorsWithPhones:kMaxMirrors))return;
   m=[GBMirror new];m.peripheral=p;m.advertisement=ad;m.relay=self;
   if(![m openOnPort:self.port queue:self.queue]){GBLog(@"the VM's Bluetooth controller isn't reachable");return;}
   self.mirrors[p.identifier]=m;

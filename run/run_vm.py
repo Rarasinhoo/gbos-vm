@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Run the Googlebook VM once with an explicit QEMU command line.
 
-  run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline | --isolated] [--no-audio] [--bluetooth]
+  run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline | --isolated | --lan] [--no-audio] [--bluetooth]
             [--webcam] [--microphone] [--display WxH] [--memory MIB] [--cpus N]
 
 WORK is the build folder (host/, image/, UTM-beta/). Logs and sockets go to WORK/logs/RUN_NAME.
 The disk is written to unless --snapshot is given. Networking is QEMU user-mode NAT with no
 inbound forwards; --offline removes it (the pointer/clipboard helper then cannot connect).
+--lan puts the guest on the Mac's own network instead, as one more device next to it (bridged
+through the socket_vmnet service that run/lan-setup.sh installs), so phones nearby can find it;
+the pointer/clipboard link then reaches the viewer at the Mac's address on that network.
 --isolated keeps only the pointer/clipboard link: the guest can't reach the internet or any
 service listening on this Mac's loopback (plain NAT maps 10.0.2.2 to the Mac's 127.0.0.1).
 On stop, Android is asked to power off through the guest control channel before QEMU is killed.
@@ -26,7 +29,7 @@ something connects, so the option is harmless on its own.
 --microphone does the same on mic.sock for a USB microphone backed by the Mac's microphone
 (host/microphone.m): QEMU's own audio devices and its coreaudio backend can only play sound.
 """
-import argparse, atexit, fcntl, json, math, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time
+import argparse, atexit, fcntl, json, math, os, re, secrets, shutil, signal, socket, stat, subprocess, sys, threading, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -43,6 +46,18 @@ CMDLINE = ('console=ttyAMA0,115200 earlycon=pl011,0x9000000 panic=0 root=/dev/ra
            'androidboot.veritymode=enforcing printk.devkmsg=on '
            'androidboot.vendor.apex.com.android.hardware.keymint.strongbox.desktop=none '
            'androidboot.vendor.apex.com.android.hardware.audio.desktop=none loglevel=3')
+
+
+LAN_SOCKET = '/opt/homebrew/var/run/googlebook-lan.sock'   # run/lan-setup.sh
+
+
+def mac_lan_address():
+    """The Mac's IPv4 address on the interface its default route uses (the one bridged for --lan)."""
+    route = subprocess.run(['route', '-n', 'get', 'default'], capture_output=True, text=True).stdout
+    iface = re.search(r'interface: (\S+)', route)
+    if not iface: return None
+    addr = subprocess.run(['ipconfig', 'getifaddr', iface.group(1)], capture_output=True, text=True).stdout.strip()
+    return addr if re.fullmatch(r'\d+\.\d+\.\d+\.\d+', addr) else None
 
 
 def find_netsimd():
@@ -147,7 +162,7 @@ def main():
     a.add_argument('work'); a.add_argument('name')
     a.add_argument('--seconds', type=int, help='power the VM off after this long (default: run until stopped)')
     a.add_argument('--snapshot', action='store_true'); a.add_argument('--offline', action='store_true')
-    a.add_argument('--isolated', action='store_true')
+    a.add_argument('--isolated', action='store_true'); a.add_argument('--lan', action='store_true')
     a.add_argument('--no-audio', action='store_true'); a.add_argument('--bluetooth', action='store_true')
     a.add_argument('--webcam', action='store_true'); a.add_argument('--microphone', action='store_true')
     a.add_argument('--display', default='1920x1200'); a.add_argument('--memory', type=int, default=4096)
@@ -159,6 +174,13 @@ def main():
     work = Path(args.work).resolve()
     if not args.name.replace('-', '').replace('_', '').isalnum(): a.error('RUN_NAME: letters, digits, - and _ only')
     if args.seconds is not None and not 10 <= args.seconds <= 86400: a.error('--seconds: 10 to 86400')
+    if args.offline + args.isolated + args.lan > 1: a.error('--offline, --isolated and --lan: one at most')
+    lan_addr = None
+    if args.lan:
+        if not stat.S_ISSOCK(os.stat(LAN_SOCKET).st_mode if os.path.exists(LAN_SOCKET) else 0):
+            sys.exit('the network bridge isn\'t set up: run  sudo run/lan-setup.sh  once')
+        lan_addr = mac_lan_address()
+        if not lan_addr: sys.exit('the Mac has no IPv4 address on its network right now')
     image = Path(args.image).resolve() if args.image else work / 'image'
     if not (image / 'gfxstream.json').exists():
         sys.exit(f'{image} was built for the old virgl graphics; run ./update-image.sh (your data stays)')
@@ -218,7 +240,11 @@ def main():
            '-chardev', 'socket,id=serial0,path=serial.sock,server=on,wait=off,logfile=serial.log',
            '-serial', 'chardev:serial0', '-qmp', 'unix:qmp.sock,server=on,wait=off']
     if args.snapshot: cmd.append('-snapshot')
-    if not args.offline:
+    if args.lan:
+        cmd += ['-netdev', f'stream,id=googlebooknet,server=off,addr.type=unix,addr.path={LAN_SOCKET}',
+                '-device', 'usb-net,id=ethernet,netdev=googlebooknet,bus=xhci.0,mac=52:54:00:12:34:56']
+        (out / 'host-address').write_text(lan_addr + '\n')   # the viewer listens there too
+    elif not args.offline:
         # Isolated: only the one forward to the viewer's loopback port.
         isolate = ',restrict=on,guestfwd=tcp:10.0.2.100:27183-cmd:/usr/bin/nc 127.0.0.1 27183' if args.isolated else ''
         cmd += ['-netdev', 'user,id=googlebooknet,ipv6=off' + isolate,
@@ -254,7 +280,7 @@ def main():
         proc = subprocess.Popen(cmd, cwd=out, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                                 pass_fds=(lock.fileno(),))
         print('PID', proc.pid, 'logs', out, flush=True)
-        threading.Thread(target=send_token, args=(proc, out, token, '10.0.2.100' if args.isolated else '10.0.2.2'), daemon=True).start()
+        threading.Thread(target=send_token, args=(proc, out, token, lan_addr or ('10.0.2.100' if args.isolated else '10.0.2.2')), daemon=True).start()
         def interrupt(signum, frame): raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupt)
         rc = None

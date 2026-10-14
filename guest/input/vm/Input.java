@@ -1,6 +1,7 @@
 // Guest input helper for the Googlebook VM, run with app_process as
 // the shell user. It connects out to the viewer on the host (10.0.2.2 is the
-// host loopback under QEMU user networking, 10.0.2.100 in isolated mode) and, on its request, injects
+// host loopback under QEMU user networking, 10.0.2.100 in isolated mode, the Mac's own address
+// when the VM is on its network) and, on its request, injects
 // absolute mouse events and syncs clipboard text. Same approach as scrcpy's
 // server (InputManager injection as shell), with a small line protocol:
 //   host -> guest:  M x y | D button | U button | S hscroll vscroll | X | K keycode | C base64-text
@@ -157,7 +158,8 @@ public final class Input {
             String t = f.readLine(), h = f.readLine();
             if (t == null || !t.matches("[0-9a-f]{32}")) return false;
             token = t;
-            host = "10.0.2.100".equals(h) ? h : "10.0.2.2";
+            // QEMU's host address, its isolated-mode forward, or the Mac on its own network (--lan)
+            host = h != null && h.matches("\\d{1,3}(\\.\\d{1,3}){3}") ? h : "10.0.2.2";
             return true;
         } catch (Exception e) { return false; }
     }

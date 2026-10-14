@@ -20,7 +20,8 @@ handle() {
       t=${line#VM_TOKEN }; tok=${t%% *}; addr=${t#* }
       case "$tok" in *[!0-9a-f]*) return ;; esac
       [ ${#tok} -eq 32 ] || return
-      case "$addr" in 10.0.2.2|10.0.2.100) ;; *) return ;; esac
+      # The viewer: QEMU's host address, its isolated-mode forward, or the Mac on its own network
+      case "$addr" in *[!0-9.]*|*..*|.*|*.) return ;; *.*.*.*) ;; *) return ;; esac
       (umask 077; printf '%s\n%s\n' "$tok" "$addr" >"$TOKEN_FILE.new" && mv -f "$TOKEN_FILE.new" "$TOKEN_FILE") && echo "VM_CONTROL token set" ;;
     VM_DENSITY\ [0-9][0-9][0-9])
       timeout 8 wm density "${line#VM_DENSITY }"

@@ -15,6 +15,9 @@
 #import <CommonCrypto/CommonHMAC.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/sysctl.h>
+#include <net/route.h>
+#include <net/if_dl.h>
 
 static unsigned short scan[128] = {
  [0]=0x1e,[1]=0x1f,[2]=0x20,[3]=0x21,[4]=0x23,[5]=0x22,[6]=0x2c,[7]=0x2d,[8]=0x2e,[9]=0x2f,[11]=0x30,
@@ -231,11 +234,29 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) dispatch_source_t selftest2;
 @property(nonatomic,strong) NSMutableData *ctlOut;          // queued for the guest helper
 @property(nonatomic,strong) dispatch_source_t writeSource;  // waits for room in the socket
-@property(nonatomic,strong) dispatch_source_t acceptSource;
+@property(nonatomic,strong) NSMutableArray<dispatch_source_t> *acceptSources;
+@property(nonatomic) BOOL lanListening;
 @property(nonatomic,strong) dispatch_source_t readSource;
 @property(nonatomic) int ctlFd;
 @property(nonatomic,strong) NSMutableArray *ctlPending; // read sources of connections still proving the token, oldest first
 @end
+// Whether an address on the Mac's network belongs to the VM: its network card's MAC address
+// (run_vm.py gives it 52:54:00:12:34:56) in the Mac's ARP table.
+static BOOL isVMAddress(struct in_addr ip) {
+ int mib[6]={CTL_NET,PF_ROUTE,0,AF_INET,NET_RT_FLAGS,RTF_LLINFO};size_t len=0;
+ if(sysctl(mib,6,NULL,&len,NULL,0)<0||!len)return NO;
+ NSMutableData *buf=[NSMutableData dataWithLength:len];
+ if(sysctl(mib,6,buf.mutableBytes,&len,NULL,0)<0)return NO;
+ static const uint8_t vm[6]={0x52,0x54,0x00,0x12,0x34,0x56};
+ for(char *p=buf.mutableBytes,*end=p+len;p<end;){
+  struct rt_msghdr *rtm=(struct rt_msghdr *)p;if(!rtm->rtm_msglen)break;
+  struct sockaddr_in *sin=(struct sockaddr_in *)(rtm+1);
+  struct sockaddr_dl *sdl=(struct sockaddr_dl *)((char *)sin+(sin->sin_len?((sin->sin_len+3)&~3):4));
+  if(sin->sin_addr.s_addr==ip.s_addr&&sdl->sdl_family==AF_LINK&&sdl->sdl_alen==6&&!memcmp(LLADDR(sdl),vm,6))return YES;
+  p+=rtm->rtm_msglen;
+ }
+ return NO;
+}
 // A screen's refresh rate in Hz, as precisely as macOS reports it (59.94 rather than 60).
 static double screenRefresh(NSScreen *screen) {
  CGDirectDisplayID did=[screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];CGDisplayModeRef mode=CGDisplayCopyDisplayMode(did);
@@ -373,6 +394,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  NSString *network=[d stringForKey:@"Network"];
  if([network isEqualToString:@"off"])[args addObject:@"--offline"];
  else if([network isEqualToString:@"isolated"])[args addObject:@"--isolated"];
+ else if([network isEqualToString:@"lan"])[args addObject:@"--lan"];
  if(![d boolForKey:@"Audio"])[args addObject:@"--no-audio"];
  if([d boolForKey:@"Camera"]){
   // The guest gets a USB webcam backed by this Mac's camera (host/webcam.m). It connects to the
@@ -416,11 +438,16 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
    if(tk.length)setenv("VM_INPUT_TOKEN",tk.UTF8String,1);
    self.socketPath=[self.runDir stringByAppendingPathComponent:@"spice.sock"];[self connectSpice];return;
   }
+  if(!self.lanListening){
+   NSString *lan=[NSString stringWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"host-address"] encoding:NSUTF8StringEncoding error:nil];
+   struct in_addr ia;
+   if(lan.length&&inet_pton(AF_INET,[lan stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].UTF8String,&ia)==1)self.lanListening=[self listenControlAt:ia.s_addr onlyVM:YES];
+  }
   if(!self.bluetooth&&[d boolForKey:@"Bluetooth"]){
    NSString *port=[NSString stringWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"bluetooth-port"] encoding:NSUTF8StringEncoding error:nil];
-   if(port.intValue>0){self.bluetooth=[[GBBluetoothRelay alloc] initWithHCIPort:port.intValue log:[self.runDir stringByAppendingPathComponent:@"bluetooth.log"]];[self.bluetooth start];}
+   if(port.intValue>0){self.bluetooth=[[GBBluetoothRelay alloc] initWithHCIPort:port.intValue log:[self.runDir stringByAppendingPathComponent:@"bluetooth.log"] phones:[d boolForKey:@"BluetoothPhones"]];[self.bluetooth start];}
   }
-  if(self.densitySent&&(self.bluetooth||![d boolForKey:@"Bluetooth"]||[fm fileExistsAtPath:[self.runDir stringByAppendingPathComponent:@"bluetooth-none"]])){[timer invalidate];return;}
+  if(self.densitySent&&(self.lanListening||![[d stringForKey:@"Network"] isEqualToString:@"lan"])&&(self.bluetooth||![d boolForKey:@"Bluetooth"]||[fm fileExistsAtPath:[self.runDir stringByAppendingPathComponent:@"bluetooth-none"]])){[timer invalidate];return;}
   if(self.densitySent)return;
   // Once Android is up, match the display density to the resolution (the setting persists).
   NSData *log=[NSData dataWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"serial.log"]];
@@ -532,11 +559,12 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
    @[[NSGridCell emptyContentView],[self checkbox:@"StartFullscreen" title:@"Start in full screen"]],
    @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],
    @[label(@"Processor cores:"),[self popup:@"CPUs" titles:@[@"4",@"6",@"8"] values:@[@4,@6,@8]]],
-   @[label(@"Network:"),[self popup:@"Network" titles:@[@"Internet",@"Isolated from this Mac (no internet or Mac services)",@"Off (also no pointer or clipboard link)"] values:@[@"full",@"isolated",@"off"]]],
+   @[label(@"Network:"),[self popup:@"Network" titles:@[@"Internet",@"Same network as this Mac (phones nearby can find it; needs run/lan-setup.sh once)",@"Isolated from this Mac (no internet or Mac services)",@"Off (also no pointer or clipboard link)"] values:@[@"full",@"lan",@"isolated",@"off"]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Audio" title:@"Audio output"]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Camera" title:@"Camera (Android sees this Mac's camera as a USB webcam)"]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Microphone" title:@"Microphone (Android hears this Mac's microphone as a USB mic)"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Bluetooth" title:@"Bluetooth (experimental: Android sees the Bluetooth LE devices near this Mac)"]]]];
+   @[[NSGridCell emptyContentView],[self checkbox:@"Bluetooth" title:@"Bluetooth (experimental: Android sees the Bluetooth LE devices near this Mac)"]],
+   @[[NSGridCell emptyContentView],[self checkbox:@"BluetoothPhones" title:@"… Android phones too (yours, for Quick Share and Better Together; also others nearby)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
   NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,470) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
@@ -572,14 +600,23 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  [self.ctlPending removeObject:rs];dispatch_source_cancel(rs);
 }
 - (void)startControlServer {
- self.ctlFd=-1;self.ctlPending=[NSMutableArray array];signal(SIGPIPE,SIG_IGN);
- const char *pe=getenv("VM_INPUT_PORT");int port=pe?atoi(pe):27183;if(port<=0)return;
+ self.ctlFd=-1;self.ctlPending=[NSMutableArray array];self.acceptSources=[NSMutableArray array];signal(SIGPIPE,SIG_IGN);
+ [self listenControlAt:htonl(INADDR_LOOPBACK) onlyVM:NO];
+}
+// The pointer link listens on loopback, which QEMU's user networking reaches. A VM on the Mac's
+// own network (--lan) comes from that network instead: there, only the VM's network card may
+// connect (by its MAC address, from the Mac's ARP table), and it still has to prove the token.
+- (BOOL)listenControlAt:(in_addr_t)addr onlyVM:(BOOL)onlyVM {
+ const char *pe=getenv("VM_INPUT_PORT");int port=pe?atoi(pe):27183;if(port<=0)return NO;
  int ls=socket(AF_INET,SOCK_STREAM,0),one=1;setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
- struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
- if(bind(ls,(struct sockaddr *)&a,sizeof a)||listen(ls,1)){fprintf(stderr,"CONTROL listen failed on %d\n",port);close(ls);self.window.subtitle=[NSString stringWithFormat:@"Pointer link unavailable: port %d is in use by another program",port];return;}
- self.acceptSource=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,ls,0,dispatch_get_main_queue());
- dispatch_source_set_event_handler(self.acceptSource,^{
-  int fd=accept(ls,NULL,NULL);if(fd<0)return;
+ struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=addr};
+ if(bind(ls,(struct sockaddr *)&a,sizeof a)||listen(ls,1)){fprintf(stderr,"CONTROL listen failed on %d\n",port);close(ls);self.window.subtitle=[NSString stringWithFormat:@"Pointer link unavailable: port %d is in use by another program",port];return NO;}
+ dispatch_source_t acceptSource=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,ls,0,dispatch_get_main_queue());
+ [self.acceptSources addObject:acceptSource];
+ dispatch_source_set_event_handler(acceptSource,^{
+  struct sockaddr_in peer;socklen_t pl=sizeof peer;
+  int fd=accept(ls,(struct sockaddr *)&peer,&pl);if(fd<0)return;
+  if(onlyVM&&!isVMAddress(peer.sin_addr)){char ip[INET_ADDRSTRLEN];fprintf(stderr,"CONTROL refused %s: not the VM\n",inet_ntop(AF_INET,&peer.sin_addr,ip,sizeof ip));close(fd);return;}
   // No token, no link. Drop the oldest waiting peer so held open sockets can't lock the helper out.
   const char *tk=getenv("VM_INPUT_TOKEN");if(!tk||!*tk){close(fd);return;}
   while(self.ctlPending.count>=8)[self ctlDrop:self.ctlPending.firstObject];
@@ -620,7 +657,8 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
    if([self.ctlPending containsObject:rs]){fprintf(stderr,"CONTROL dropped peer: no token\n");[self ctlDrop:rs];}
   });
  });
- dispatch_resume(self.acceptSource);fprintf(stderr,"CONTROL listening on 127.0.0.1:%d\n",port);
+ dispatch_resume(acceptSource);char ip[INET_ADDRSTRLEN];fprintf(stderr,"CONTROL listening on %s:%d\n",inet_ntop(AF_INET,&a.sin_addr,ip,sizeof ip),port);
+ return YES;
 }
 // Command V is the only time Mac clipboard text goes to the guest.
 - (void)pasteIntoGuest:(id)sender{
