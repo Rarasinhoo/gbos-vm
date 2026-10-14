@@ -23,18 +23,17 @@ case "$vm_user" in
     ''|*[!0-9]*|0) echo VM_OFFLINE_DESKTOP_NO_FOREGROUND_USER; exit 1 ;;
 esac
 echo "VM_OFFLINE_DESKTOP_USER=$vm_user"
-cmd package query-activities --brief --user "$vm_user" -a android.intent.action.MAIN -c android.intent.category.HOME
-settings put global device_provisioned 1
-settings --user 0 put secure user_setup_complete 1
-settings --user "$vm_user" put secure user_setup_complete 1
-pm disable-user --user "$vm_user" com.google.android.setupwizard
-pm disable-user --user "$vm_user" com.google.android.desktop.setupwizard
+if [ "$(settings get global device_provisioned)" != 1 ]; then
+    settings put global device_provisioned 1
+    settings --user 0 put secure user_setup_complete 1
+    settings --user "$vm_user" put secure user_setup_complete 1
+    pm disable-user --user "$vm_user" com.google.android.setupwizard
+    pm disable-user --user "$vm_user" com.google.android.desktop.setupwizard
+fi
 svc power stayon true
 # The Mac decides when this machine sleeps. Android must not: with the Mac's battery showing
 # (unplugged), it would turn the screen off after its timeout and suspend, and nothing from the
 # viewer can wake a suspended VM, so the window stays black.
 settings --user "$vm_user" put system screen_off_timeout 2147483647
 am start --user "$vm_user" -a android.intent.action.MAIN -c android.intent.category.HOME -p com.google.android.apps.nexuslauncher
-settings get global device_provisioned
-settings --user "$vm_user" get secure user_setup_complete
 echo "VM_OFFLINE_DESKTOP_END uptime=$(cut -d' ' -f1 /proc/uptime)"

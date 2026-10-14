@@ -119,7 +119,6 @@ public final class Input {
                         authed = true; out = link;
                         continue;
                     }
-                    if (line.startsWith("A ")) continue;
                     try { handle(line); } catch (Throwable t) {
                         Throwable cause = t.getCause() != null ? t.getCause() : t;
                         System.out.println("VM_INPUT error " + line.charAt(0) + ": " + cause);
@@ -329,11 +328,8 @@ public final class Input {
     }
 
     // F button count [id x y]...: the contacts now on the Mac trackpad, and the pad's button.
-    private static int framesSeen; private static long firstFrame;
     private static void touchFrame(String[] p) {
         if (touchpad == null || !touchpadProcess.isAlive()) { touchpad = null; return; }
-        if (framesSeen++ == 0) firstFrame = SystemClock.uptimeMillis();
-        else if (framesSeen % 100 == 0) System.out.println("VM_INPUT touchpad got " + framesSeen + " frames in " + (SystemClock.uptimeMillis() - firstFrame) + " ms");
         int button = Integer.parseInt(p[1]), count = Math.min(Integer.parseInt(p[2]), slotContact.length);
         int[] ids = new int[count], xs = new int[count], ys = new int[count];
         for (int i = 0; i < count; i++) {
@@ -376,18 +372,44 @@ public final class Input {
 
     // B: the Mac's battery, so Android shows it instead of an empty one (a VM has none). The level
     // goes first: an override that unplugs before raising the level is an empty battery, and
-    // Android shuts down at once. Status: 2 charging, 3 discharging, 5 full.
+    // Android shuts down at once. Status: 2 charging, 3 discharging, 5 full. Each `cmd` takes a
+    // while, so they run on their own thread, never holding up the input behind them.
     private static int batteryLevel = -1;
     private static boolean batteryPlugged, batteryCharging;
-    private static void battery(int level, boolean plugged, boolean charging) throws Exception {
+    private static final Object batteryLock = new Object();
+    private static String[] batteryPending; // newest level, ac, status not yet applied
+    private static void battery(int level, boolean plugged, boolean charging) {
         level = Math.max(1, Math.min(100, level));
         if (level == batteryLevel && plugged == batteryPlugged && charging == batteryCharging) return;
-        String status = charging ? "2" : plugged ? "5" : "3";
-        for (String[] a : new String[][] { { "level", String.valueOf(level) }, { "present", "1" }, { "ac", plugged ? "1" : "0" },
-                                           { "usb", "0" }, { "wireless", "0" }, { "status", status } })
-            Runtime.getRuntime().exec(new String[] { "cmd", "battery", "set", a[0], a[1] }).waitFor();
-        if (batteryLevel < 0) System.out.println("VM_INPUT battery " + level + "%" + (plugged ? " plugged" : "") + (charging ? " charging" : ""));
+        if (batteryLevel < 0) {
+            System.out.println("VM_INPUT battery " + level + "%" + (plugged ? " plugged" : "") + (charging ? " charging" : ""));
+            Thread t = new Thread(Input::batteryLoop, "battery");
+            t.setDaemon(true);
+            t.start();
+        }
         batteryLevel = level; batteryPlugged = plugged; batteryCharging = charging;
+        synchronized (batteryLock) {
+            batteryPending = new String[] { String.valueOf(level), plugged ? "1" : "0", charging ? "2" : plugged ? "5" : "3" };
+            batteryLock.notify();
+        }
+    }
+
+    private static void batteryLoop() {
+        boolean first = true;
+        while (true) {
+            String[] v;
+            synchronized (batteryLock) {
+                while (batteryPending == null) try { batteryLock.wait(); } catch (InterruptedException e) { return; }
+                v = batteryPending; batteryPending = null;
+            }
+            String[][] set = first
+                ? new String[][] { { "level", v[0] }, { "present", "1" }, { "ac", v[1] }, { "usb", "0" }, { "wireless", "0" }, { "status", v[2] } }
+                : new String[][] { { "level", v[0] }, { "ac", v[1] }, { "status", v[2] } };
+            first = false;
+            try {
+                for (String[] a : set) Runtime.getRuntime().exec(new String[] { "cmd", "battery", "set", a[0], a[1] }).waitFor();
+            } catch (Throwable t) { System.out.println("VM_INPUT battery: " + t); }
+        }
     }
 
     // W: scrolling with a Mac trackpad's precision. The USB mouse has a wheel of whole notches
@@ -429,8 +451,9 @@ public final class Input {
     private static void drain(Process process, String tag) {
         Thread t = new Thread(() -> {
             try (BufferedReader r = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                // Keep reading to the end, so a chatty process never blocks on a full pipe.
                 String line; int n = 0;
-                while ((line = r.readLine()) != null && n++ < 40) System.out.println("VM_INPUT " + tag + ": " + line);
+                while ((line = r.readLine()) != null) if (n++ < 40) System.out.println("VM_INPUT " + tag + ": " + line);
             } catch (Throwable e) { /* process ended */ }
         }, tag);
         t.setDaemon(true);

@@ -1,7 +1,7 @@
 diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
 --- a/hw/display/virtio-gpu-rutabaga.c	2026-07-27 00:50:42
-+++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-13 19:40:34
-@@ -12,7 +12,33 @@
++++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-14 11:35:19
+@@ -12,7 +12,31 @@
  
  #include <glib/gmem.h>
  #include <rutabaga_gfx/rutabaga_gfx_ffi.h>
@@ -23,10 +23,8 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
 +    static bool looked;
 +    if (!looked) {
 +        looked = true;
-+        if (!getenv("GBOS_GFXSTREAM_READBACK")) {
-+            fn = (get_metal_texture_fn)dlsym(RTLD_DEFAULT,
-+                                             "stream_renderer_resource_get_metal_texture");
-+        }
++        fn = (get_metal_texture_fn)dlsym(RTLD_DEFAULT,
++                                         "stream_renderer_resource_get_metal_texture");
 +    }
 +    return fn;
 +}
@@ -35,7 +33,7 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
  #define CHECK(condition, cmd)                                                 \
      do {                                                                      \
          if (!(condition)) {                                                   \
-@@ -268,6 +294,13 @@
+@@ -268,6 +292,13 @@
          return;
      }
  
@@ -49,7 +47,7 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
      transfer.x = 0;
      transfer.y = 0;
      transfer.z = 0;
-@@ -306,6 +339,9 @@
+@@ -306,6 +337,9 @@
      scanout = &vb->scanout[ss.scanout_id];
  
      if (ss.resource_id == 0) {
@@ -59,7 +57,7 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
          dpy_gfx_replace_surface(scanout->con, NULL);
          dpy_gl_scanout_disable(scanout->con);
          return;
-@@ -314,6 +350,34 @@
+@@ -314,6 +348,29 @@
      res = virtio_gpu_find_resource(g, ss.resource_id);
      CHECK(res, cmd);
  
@@ -68,11 +66,6 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
 +        get_metal_texture_fn get_texture = rutabaga_metal_texture_fn();
 +        void *texture = NULL;
 +        int rc = get_texture ? get_texture(ss.resource_id, &texture) : -1;
-+        static int reported;
-+        if (reported++ < 3) {
-+            fprintf(stderr, "rutabaga: scanout %u resource %u metal texture %s (%d)\n",
-+                    ss.scanout_id, ss.resource_id, texture ? "yes" : "no", rc);
-+        }
 +        if (rc == 0 && texture) {
 +            ScanoutTextureNative native = {
 +                .type = SCANOUT_TEXTURE_NATIVE_TYPE_METAL,
@@ -94,7 +87,7 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
      if (!res->image) {
          pixman_format_code_t pformat;
          pformat = virtio_gpu_get_pixman_format(res->format);
-@@ -1030,6 +1094,13 @@
+@@ -1030,6 +1087,13 @@
              builder.channels = &channels;
          }
      }
@@ -110,7 +103,7 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
      if (result) {
 diff -ruN a/ui/console-gl.c b/ui/console-gl.c
 --- a/ui/console-gl.c	2026-07-27 00:50:43
-+++ b/ui/console-gl.c	2026-10-13 19:40:34
++++ b/ui/console-gl.c	2026-10-13 18:26:03
 @@ -64,6 +64,12 @@
          surface->glformat = GL_RGBA;
          surface->gltype = GL_UNSIGNED_BYTE;
@@ -126,7 +119,7 @@ diff -ruN a/ui/console-gl.c b/ui/console-gl.c
          surface->gltype = GL_UNSIGNED_SHORT_5_6_5;
 diff -ruN a/ui/spice-display-metal.m b/ui/spice-display-metal.m
 --- a/ui/spice-display-metal.m	2026-07-27 00:50:43
-+++ b/ui/spice-display-metal.m	2026-10-13 19:40:34
++++ b/ui/spice-display-metal.m	2026-10-13 19:34:38
 @@ -18,6 +18,8 @@
  @property (nonatomic, readonly) id<MTLCommandQueue> commandQueue;
  @property (nonatomic, nullable, retain) id<MTLTexture> scanoutTexture;
