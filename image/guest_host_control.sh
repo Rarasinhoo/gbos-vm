@@ -25,11 +25,6 @@ handle() {
     VM_DENSITY\ [0-9][0-9][0-9])
       timeout 8 wm density "${line#VM_DENSITY }"
       echo "VM_CONTROL density $(timeout 5 wm density | tr '\n' ' ')" ;;
-    VM_POINTER_ACCEL_OFF)
-      u=$(timeout 5 am get-current-user)
-      timeout 5 settings --user "$u" put system mouse_pointer_acceleration_enabled 0
-      timeout 5 settings --user "$u" put system pointer_speed 0
-      echo "VM_CONTROL accel=$(timeout 5 settings --user "$u" get system mouse_pointer_acceleration_enabled) speed=$(timeout 5 settings --user "$u" get system pointer_speed)" ;;
     VM_LOG)
       # Recent warnings and errors, and what is on screen, for diagnosing a misbehaving app
       timeout 10 logcat -d -b main,system,crash -t 4000 '*:W' 2>/dev/null | grep -v -E 'audit|avc:|libperfmgr|touchpad-inhibitor|ServiceManagerCppClient|ctl.interface_start|QMI_FW|pd-mapper|memtrack|[sac]+dsprpcd|sscrpcd|QSEECOMD|ssgqmigd|MinkDaemon|timberslide|PerMgr|tftp_server|WakeLock|PlayCommon' | tail -120 | cut -c1-220 | sed 's/^/VM_CONTROL log /'

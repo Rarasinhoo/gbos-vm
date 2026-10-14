@@ -15,9 +15,9 @@
 //   guest -> host:  a guest-nonce HMAC-SHA256(token, "gbos-guest:" host-nonce ":" guest-nonce)
 //   host -> guest:  A HMAC-SHA256(token, "gbos-host:" guest-nonce ":" host-nonce)
 // Nothing else is sent or accepted until it succeeds.
-// The pointer: events are injected at the Mac cursor's position, and the Mac cursor is what
-// shows. When an app asks for pointer capture (a game, a browser's pointer lock), the Mac locks
-// its mouse and the motion goes to a relative uinput mouse that exists only while it is locked.
+// The pointer: Android's own, a uinput mouse steered to the Mac cursor's position (see steer),
+// so it takes the shapes apps ask for. When an app asks for pointer capture (a game, a browser's
+// pointer lock), the Mac locks its mouse and the same mouse passes on the raw motion.
 // Touchpad: a uinput multitouch touchpad the host feeds with the Mac trackpad's raw contacts
 // (F: x and y from 0 to 1, top left origin), so Android's own touchpad stack does the pointer
 // acceleration, two-finger scrolling, pinch and swipes, as on a real touchpad.
@@ -57,8 +57,7 @@ public final class Input {
     private static String token = "", host = "10.0.2.2";
     private static boolean authed;
     private static final SecureRandom random = new SecureRandom();
-    private static Process mouseProcess;
-    private static OutputStream mouse;          // the locked mouse, while there is one
+    private static volatile boolean locked;     // the Mac's mouse is locked for an app
     private static float mouseCarryX, mouseCarryY;
     private static volatile long lastActive;    // uptime of the host's last pointer or key event
     private static Process touchpadProcess;
@@ -80,6 +79,11 @@ public final class Input {
             IBinder b = (IBinder) Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "clipboard");
             clipboard = Class.forName("android.content.IClipboard$Stub").getMethod("asInterface", IBinder.class).invoke(null, b);
         } catch (Throwable t) { System.out.println("VM_INPUT clipboard unavailable: " + t); }
+        try (BufferedReader f = new BufferedReader(new FileReader(GAIN_FILE))) {
+            String[] g = f.readLine().trim().split(" ");
+            double gx = Double.parseDouble(g[0]), gy = Double.parseDouble(g[1]);
+            if (gx > 0.25 && gx < 4 && gy > 0.25 && gy < 4) { gainX = gx; gainY = gy; }
+        } catch (Throwable t) { /* learnt as the pointer moves */ }
         System.out.println("VM_INPUT ready");
         Thread poll = new Thread(Input::pollClipboard, "clip");
         poll.setDaemon(true);
@@ -183,12 +187,13 @@ public final class Input {
             case 'M':
                 lastActive = SystemClock.uptimeMillis();
                 x = Float.parseFloat(p[1]); y = Float.parseFloat(p[2]);
+                if (pointerOut != null) { steer(x, y); break; }
                 motion(buttons != 0 ? MotionEvent.ACTION_MOVE : MotionEvent.ACTION_HOVER_MOVE, 0, 0, 0);
                 break;
             case 'D': {
                 lastActive = SystemClock.uptimeMillis();
                 int b = Integer.parseInt(p[1]);
-                if (mouse != null) { mouseSend("1," + mouseButton(b) + ",1,0,0,0"); break; }
+                if (pointerOut != null) { pointerSend("1," + mouseButton(b) + ",1,0,0,0"); break; }
                 if (buttons == 0) { downTime = SystemClock.uptimeMillis(); buttons |= b; motion(MotionEvent.ACTION_DOWN, 0, 0, 0); }
                 else buttons |= b;
                 motion(MotionEvent.ACTION_BUTTON_PRESS, b, 0, 0);
@@ -196,7 +201,7 @@ public final class Input {
             }
             case 'U': {
                 int b = Integer.parseInt(p[1]);
-                if (mouse != null) { mouseSend("1," + mouseButton(b) + ",0,0,0,0"); break; }
+                if (pointerOut != null) { pointerSend("1," + mouseButton(b) + ",0,0,0,0"); break; }
                 if ((buttons & b) == 0) break;
                 buttons &= ~b;
                 motion(MotionEvent.ACTION_BUTTON_RELEASE, b, 0, 0);
@@ -206,21 +211,26 @@ public final class Input {
             case 'S': {
                 lastActive = SystemClock.uptimeMillis();
                 float hs = Float.parseFloat(p[1]), vs = Float.parseFloat(p[2]);
+                if (pointerOut != null) { wheel(Math.round(vs * 120), Math.round(hs * 120)); break; }
                 motion(MotionEvent.ACTION_SCROLL, 0, hs, vs);
                 break;
             }
             case 'X':
-                if (buttons == 0) motion(MotionEvent.ACTION_HOVER_EXIT, 0, 0, 0);
+                if (pointerOut == null && buttons == 0) motion(MotionEvent.ACTION_HOVER_EXIT, 0, 0, 0);
                 break;
             case 'K': lastActive = SystemClock.uptimeMillis(); key(Integer.parseInt(p[1])); break;
-            case 'Q': if (p[1].equals("1")) registerMouse(); else releaseMouse(); break;
+            case 'Q':
+                locked = p[1].equals("1"); mouseCarryX = mouseCarryY = 0;
+                System.out.println("VM_INPUT mouse " + (locked ? "locked" : "released"));
+                break;
             case 'R': {
+                // Locked for an app: raw motion. Android's pointer stays where it was meanwhile.
                 lastActive = SystemClock.uptimeMillis();
-                if (mouse == null) break;
+                if (!locked || pointerOut == null) break;
                 float dx = mouseCarryX + Float.parseFloat(p[1]), dy = mouseCarryY + Float.parseFloat(p[2]);
                 int ix = (int) dx, iy = (int) dy;
                 mouseCarryX = dx - ix; mouseCarryY = dy - iy;
-                if (ix != 0 || iy != 0) mouseSend("2,0," + ix + ",2,1," + iy + ",0,0,0");
+                if (ix != 0 || iy != 0) pointerSend("2,0," + ix + ",2,1," + iy + ",0,0,0");
                 break;
             }
             case 'C': setClip(p.length > 1 ? new String(Base64.decode(p[1], Base64.NO_WRAP), "UTF-8") : ""); break;
@@ -232,41 +242,7 @@ public final class Input {
         }
     }
 
-    // The locked mouse: REL_X 0, REL_Y 1; BTN_LEFT 272, BTN_RIGHT 273, BTN_MIDDLE 274. A real
-    // relative mouse is what an app holding pointer capture reads. It is removed on release,
-    // so Android has no idle mouse cursor of its own to show afterwards.
-    private static void registerMouse() {
-        if (mouse != null && mouseProcess.isAlive()) return;
-        try {
-            releaseMouse();
-            mouseProcess = new ProcessBuilder("/system/bin/uinput", "-").redirectErrorStream(true).start();
-            OutputStream o = mouseProcess.getOutputStream();
-            o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Mouse\",\"vid\":6900,\"pid\":30468,\"bus\":\"usb\","
-                    + "\"configuration\":[{\"type\":100,\"data\":[1,2]},{\"type\":101,\"data\":[272,273,274]},{\"type\":102,\"data\":[0,1]}]}\n").getBytes("UTF-8"));
-            o.flush();
-            waitForDevice(mouseProcess, "VM Mouse");
-            mouse = o; mouseCarryX = mouseCarryY = 0;
-            drain(mouseProcess, "mouse");
-            System.out.println("VM_INPUT mouse locked");
-        } catch (Throwable t) {
-            releaseMouse();
-            System.out.println("VM_INPUT locked mouse unavailable: " + t);
-        }
-    }
-
-    private static void releaseMouse() {
-        if (mouseProcess != null) { mouseProcess.destroy(); System.out.println("VM_INPUT mouse released"); }
-        mouseProcess = null; mouse = null;
-    }
-
     private static int mouseButton(int hostButton) { return hostButton == 2 ? 273 : hostButton == 4 ? 274 : 272; }
-
-    private static void mouseSend(String events) {
-        try {
-            mouse.write(("{\"id\":1,\"command\":\"inject\",\"events\":[" + events + "]}\n").getBytes("UTF-8"));
-            mouse.flush();
-        } catch (Throwable t) { releaseMouse(); }
-    }
 
     // BTN_LEFT 272, BTN_TOOL_FINGER 325, BTN_TOOL_QUINTTAP 328, BTN_TOUCH 330, BTN_TOOL_DOUBLETAP 333,
     // BTN_TOOL_TRIPLETAP 334, BTN_TOOL_QUADTAP 335; ABS_X 0, ABS_Y 1, ABS_MT_SLOT 47,
@@ -404,39 +380,118 @@ public final class Input {
         }
     }
 
-    // W: scrolling with a Mac trackpad's precision. The USB mouse has a wheel of whole notches
-    // only (a fixed jump each); this uinput mouse has a high-resolution wheel, 1/120 notch per
-    // unit, which Android scrolls by exactly. Being a mouse, it shares Android's mouse pointer,
-    // so the scroll lands wherever that is. REL_X 0, REL_Y 1, REL_HWHEEL 6, REL_WHEEL 8,
-    // REL_WHEEL_HI_RES 11, REL_HWHEEL_HI_RES 12; BTN_LEFT 272 makes it count as a mouse.
-    private static Process wheelProcess;
-    private static OutputStream wheelOut;
+    // The pointer: a uinput mouse, so it is Android's own pointer and takes the shapes apps ask
+    // for (an I-beam over text, a hand over a link), which Android applies to real mice only:
+    // injected events all count as one virtual device. It is steered to the Mac cursor's position
+    // (pointer acceleration is off, so motion maps 1:1), clicks and scrolls with it, and gives an
+    // app holding pointer capture its raw motion. Its wheel has high resolution, 1/120 notch per
+    // unit (W), so a Mac trackpad scrolls as finely as on the Mac. REL_X 0, REL_Y 1, REL_HWHEEL 6,
+    // REL_WHEEL 8, REL_WHEEL_HI_RES 11, REL_HWHEEL_HI_RES 12; BTN_LEFT 272, BTN_RIGHT 273,
+    // BTN_MIDDLE 274. Until it exists, events are injected instead.
+    private static Process pointerProcess;
+    private static volatile OutputStream pointerOut;
+    private static volatile int pointerDeviceId;
+    private static final Object steering = new Object();
+    private static boolean steered;          // the pointer's position is known: px, py
+    private static int px, py;
+    private static long lastSteer;
+    // Android moves the pointer by a fixed multiple of the motion (with acceleration off it still
+    // scales it, by the display density it seems: 1.6875 at 240 dpi). Learnt from where the
+    // pointer comes to rest (checkSteering): the motion sent since the last known position,
+    // against how far the pointer went.
+    private static double gainX = 1, gainY = 1, carryX, carryY;
+    private static final String GAIN_FILE = "/data/local/tmp/vm-input.gain";   // so a boot starts right
+    private static int anchorX, anchorY;
+    private static long sentX, sentY;
+
+    private static void steer(float tx, float ty) {
+        synchronized (steering) {
+            int sx = Math.round(tx), sy = Math.round(ty);
+            // First, into the top left corner (Android stops it there), so the position is known
+            if (!steered) {
+                pointerSend("2,0,-30000,2,1,-30000,0,0,0");
+                px = py = anchorX = anchorY = 0; sentX = sentY = 0; carryX = carryY = 0; steered = true;
+            }
+            double dx = (sx - px) / gainX + carryX, dy = (sy - py) / gainY + carryY;
+            long ix = Math.round(dx), iy = Math.round(dy);
+            carryX = dx - ix; carryY = dy - iy;
+            if (ix != 0 || iy != 0) { pointerSend("2,0," + ix + ",2,1," + iy + ",0,0,0"); sentX += ix; sentY += iy; }
+            px = sx; py = sy;
+            lastSteer = SystemClock.uptimeMillis();
+        }
+    }
+
+    /** Where Android has the pointer, from the input dump: if it isn't where the steering thinks
+     *  (something else moved it), start from there. Only while the pointer rests. */
+    private static void checkSteering(String dump) {
+        int id = pointerDeviceId;
+        if (id == 0 || locked) return;
+        // Each window lists the pointer in its own coordinates; the pointer overlay covers the
+        // display at its origin, so its entry is in display coordinates.
+        int overlay = dump.indexOf("name='PointerEventDispatcherOverlay");
+        if (overlay < 0) return;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("DeviceId\\(" + id + "\\):\\[touchingPointers=\\[[^\\]]*\\], downTimeInTarget=[^,]*, "
+            + "hoveringPointers=\\[Pointer\\(id=0, MOUSE\\) at \\((-?[0-9.]+), (-?[0-9.]+)\\)").matcher(dump);
+        if (!m.find(overlay) || dump.lastIndexOf("name='", m.start()) != overlay) return;
+        int ax = Math.round(Float.parseFloat(m.group(1))), ay = Math.round(Float.parseFloat(m.group(2)));
+        synchronized (steering) {
+            if (!steered || SystemClock.uptimeMillis() - lastSteer < 400) return;
+            if (Math.abs(ax - px) <= 1 && Math.abs(ay - py) <= 1) return;
+            // Far enough moved to tell the gain (the corner stops are clean, so these are too)
+            boolean learnt = false;
+            if (Math.abs(sentX) >= 100 && ax - anchorX != 0) { double g = (double) (ax - anchorX) / sentX; if (g > 0.25 && g < 4) { gainX = g; learnt = true; } }
+            if (Math.abs(sentY) >= 100 && ay - anchorY != 0) { double g = (double) (ay - anchorY) / sentY; if (g > 0.25 && g < 4) { gainY = g; learnt = true; } }
+            if (learnt) {
+                try (java.io.FileWriter f = new java.io.FileWriter(GAIN_FILE)) { f.write(gainX + " " + gainY + "\n"); }
+                catch (Throwable t) { /* next boot learns it again */ }
+            }
+            System.out.println("VM_INPUT pointer at " + ax + "," + ay + ", expected " + px + "," + py + (learnt
+                ? String.format(java.util.Locale.ROOT, ": gain now %.3f x %.3f", gainX, gainY) : ": corrected"));
+            px = anchorX = ax; py = anchorY = ay; sentX = sentY = 0; carryX = carryY = 0;
+        }
+    }
+
+    private static void pointerSend(String events) {
+        try {
+            OutputStream o = pointerOut;
+            o.write(("{\"id\":1,\"command\":\"inject\",\"events\":[" + events + "]}\n").getBytes("UTF-8"));
+            o.flush();
+        } catch (Throwable t) { pointerOut = null; steered = false; }
+    }
+
     private static void wheel(int vertical, int horizontal) {
-        if (wheelOut == null || !wheelProcess.isAlive()) {
+        if (pointerOut == null || !pointerProcess.isAlive()) {
             try {
-                if (wheelProcess != null) wheelProcess.destroy();
-                wheelOut = null;
-                wheelProcess = new ProcessBuilder("/system/bin/uinput", "-").redirectErrorStream(true).start();
-                OutputStream o = wheelProcess.getOutputStream();
-                o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Scroll Wheel\",\"vid\":6900,\"pid\":30467,\"bus\":\"usb\","
-                        + "\"configuration\":[{\"type\":100,\"data\":[1,2]},{\"type\":101,\"data\":[272]},{\"type\":102,\"data\":[0,1,6,8,11,12]}]}\n").getBytes("UTF-8"));
+                if (pointerProcess != null) pointerProcess.destroy();
+                pointerOut = null; steered = false;
+                pointerProcess = new ProcessBuilder("/system/bin/uinput", "-").redirectErrorStream(true).start();
+                OutputStream o = pointerProcess.getOutputStream();
+                o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Pointer\",\"vid\":6900,\"pid\":30467,\"bus\":\"usb\","
+                        + "\"configuration\":[{\"type\":100,\"data\":[1,2]},{\"type\":101,\"data\":[272,273,274]},{\"type\":102,\"data\":[0,1,6,8,11,12]}]}\n").getBytes("UTF-8"));
                 o.flush();
-                waitForDevice(wheelProcess, "VM Scroll Wheel");
-                wheelOut = o;
-                drain(wheelProcess, "wheel");
-                System.out.println("VM_INPUT wheel registered");
+                // Steering needs motion to map 1:1: no acceleration, the middle speed. In the
+                // background (each `settings` call takes about a second); steering starts after.
+                Thread accel = new Thread(() -> {
+                    try {
+                        for (String[] kv : new String[][] { { "mouse_pointer_acceleration_enabled", "0" }, { "pointer_speed", "0" } })
+                            Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", kv[0], kv[1] }).waitFor();
+                    } catch (Throwable t) { System.out.println("VM_INPUT pointer settings: " + t); }
+                    synchronized (steering) { steered = false; }
+                }, "pointer-settings");
+                accel.setDaemon(true);
+                accel.start();
+                pointerDeviceId = waitForDevice(pointerProcess, "VM Pointer");
+                pointerOut = o;
+                drain(pointerProcess, "pointer");
+                System.out.println("VM_INPUT pointer registered");
                 reply("w wheel");
             } catch (Throwable t) {
-                System.out.println("VM_INPUT wheel unavailable: " + t);
+                System.out.println("VM_INPUT pointer unavailable, injecting instead: " + t);
                 reply("w none");
                 return;
             }
         }
-        if (vertical == 0 && horizontal == 0) return;
-        try {
-            wheelOut.write(("{\"id\":1,\"command\":\"inject\",\"events\":[2,11," + vertical + ",2,12," + horizontal + ",0,0,0]}\n").getBytes("UTF-8"));
-            wheelOut.flush();
-        } catch (Throwable t) { wheelOut = null; }
+        if (vertical != 0 || horizontal != 0) pointerSend("2,11," + vertical + ",2,12," + horizontal + ",0,0,0");
     }
 
     private static void drain(Process process, String tag) {
@@ -458,7 +513,7 @@ public final class Input {
     }
 
     private static void releaseAll() {
-        releaseMouse();
+        locked = false;
         captureSent = false;
         try { if (touchpad != null) touchFrame(new String[] { "F", "0", "0" }); } catch (Throwable t) { /* gone */ }
         try {
@@ -553,8 +608,10 @@ public final class Input {
         IBinder service = null;
         boolean reported = false;
         while (true) {
+            // Twice a second while the Mac uses the VM, then not at all until it does again
             SystemClock.sleep(500);
-            if (out == null || SystemClock.uptimeMillis() - lastActive > 10000) continue;
+            long idle = SystemClock.uptimeMillis() - lastActive;
+            if (out == null || idle > 10000) continue;
             try {
                 if (service == null) service = (IBinder) Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "input");
                 long start = SystemClock.uptimeMillis();
@@ -569,6 +626,7 @@ public final class Input {
                     if (!found) for (String l : text.split("\n")) if (l.contains("Pointer Capture")) System.out.println("VM_INPUT dump: " + l.trim());
                 }
                 if (!found) return;
+                checkSteering(text);
                 if (wanted != captureSent) {
                     captureSent = wanted;
                     reply("k " + (wanted ? "1" : "0"));

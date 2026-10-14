@@ -47,8 +47,8 @@ static unsigned short scan[128] = {
 @property(nonatomic) int nextTouchId, padButton;
 @property(nonatomic,strong) NSArray *padContacts;           // the last contacts sent, for button changes
 @property(nonatomic,strong) NSTrackingArea *tracking;
-// Absolute mode: a helper inside Android injects pointer events at exact guest
-// coordinates, so the Mac cursor is the pointer and nothing needs steering.
+// Absolute mode: the helper inside Android puts Android's own pointer exactly where the Mac
+// cursor is (hidden over the window), so it moves in and out of the window freely.
 @property(nonatomic) BOOL absolute;
 // An Android app holds pointer capture (wantsLock) and the Mac mouse is locked for it (locked):
 // motion goes to the helper's relative mouse instead.
@@ -79,8 +79,9 @@ static unsigned short scan[128] = {
  CGFloat x=(p.x-(b.width-g.width*s)/2)/s,y=(b.height-p.y-(b.height-g.height*s)/2)/s;
  return CGPointMake(MAX(0,MIN(g.width-1,x)),MAX(0,MIN(g.height-1,y)));
 }
-- (void)mouseEntered:(NSEvent *)e {if(self.absolute)self.inside=YES;}
-- (void)mouseExited:(NSEvent *)e {if(self.absolute&&!self.locked){self.inside=NO;self.sendLine(@"X");}}
+// Over the window, Android's own pointer is the one to see (it has the shapes apps ask for).
+- (void)mouseEntered:(NSEvent *)e {if(self.absolute){self.inside=YES;[self setHostCursorHidden:YES];}}
+- (void)mouseExited:(NSEvent *)e {if(self.absolute&&!self.locked){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}}
 // Lock the Mac mouse for the Android app that asked for pointer capture: only while this window
 // is in front with the pointer over it, so an app in the background can't take the mouse away.
 - (void)lockForApp {
@@ -92,7 +93,7 @@ static unsigned short scan[128] = {
 }
 - (void)unlock {
  if(!self.locked)return;
- self.locked=NO;self.sendLine(@"Q 0");CGAssociateMouseAndMouseCursorPosition(true);[self setHostCursorHidden:NO];
+ self.locked=NO;self.sendLine(@"Q 0");CGAssociateMouseAndMouseCursorPosition(true);[self setHostCursorHidden:self.inside];
  [NSApp.delegate performSelector:@selector(updateSubtitle)];
 }
 - (void)capture {
@@ -138,7 +139,7 @@ static unsigned short scan[128] = {
  if(self.absolute){
   // Mouse-moved events also arrive over the title bar; only own the cursor inside the view.
   if(!NSPointInRect([self convertPoint:e.locationInWindow fromView:nil],self.bounds)){if(self.inside){self.inside=NO;[self setHostCursorHidden:NO];self.sendLine(@"X");}return;}
-  self.inside=YES;CGPoint g=[self guestPoint:e];self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);return;}
+  self.inside=YES;[self setHostCursorHidden:YES];CGPoint g=[self guestPoint:e];self.sendLine([NSString stringWithFormat:@"M %.1f %.1f",g.x,g.y]);return;}
  if(!self.captured)return;
  // Fingers on the trackpad already move the guest pointer through its touchpad.
  if([self padActive]&&self.fingers)return;
@@ -188,7 +189,7 @@ static unsigned short scan[128] = {
 - (void)rightMouseDragged:(NSEvent *)e {[self mouseMoved:e];}
 - (void)otherMouseDragged:(NSEvent *)e {[self mouseMoved:e];}
 - (void)scrollWheel:(NSEvent *)e {
- if(self.absolute&&!self.locked){CGFloat k=e.hasPreciseScrollingDeltas?1.0/16:1.0;if(e.scrollingDeltaX||e.scrollingDeltaY)self.sendLine([NSString stringWithFormat:@"S %.3f %.3f",-e.scrollingDeltaX*k,e.scrollingDeltaY*k]);return;}
+ if(self.absolute&&!self.locked&&!self.wheelReady){CGFloat k=e.hasPreciseScrollingDeltas?1.0/16:1.0;if(e.scrollingDeltaX||e.scrollingDeltaY)self.sendLine([NSString stringWithFormat:@"S %.3f %.3f",-e.scrollingDeltaX*k,e.scrollingDeltaY*k]);return;}
  // A trackpad's two-finger scroll (and its momentum) already reaches the guest's touchpad.
  if(self.captured&&[self padActive]&&e.hasPreciseScrollingDeltas)return;
  if(![self live])return;
@@ -429,12 +430,6 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
     NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
     c.arguments=@[@"-I",[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,[NSString stringWithFormat:@"VM_DENSITY %ld",(long)self.guestDensity]];
     [c launchAndReturnError:nil];});
-   // macOS already accelerates the mouse; Android accelerating it again makes the captured pointer
-   // undershoot slow moves and overshoot fast ones. Sent after the density verb has been handled.
-   dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(20*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-    NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
-    c.arguments=@[@"-I",[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,@"VM_POINTER_ACCEL_OFF"];
-    [c launchAndReturnError:nil];});
   }
  }];
 }
@@ -488,8 +483,8 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  else if(self.view.relativeAllowed)self.window.subtitle=self.ctlFd>=0?@"Android touchpad: click to capture, ⌃⌥ releases":@"Click to capture • ⌃⌥ releases";
  else self.window.subtitle=@"Waiting for Android to link the pointer…";
 }
-// The pointer is automatic: the Mac cursor drives Android through the helper, and the mouse
-// locks only while an Android app holds pointer capture. With the Android touchpad on (or no
+// The pointer is automatic: the Mac cursor drives Android's pointer through the helper, and the
+// mouse locks only while an Android app holds pointer capture. With the Android touchpad on (or no
 // helper link), it is the emulated USB mouse instead: click to capture, Control+Option releases.
 - (BOOL)touchpadMode {return [[NSUserDefaults standardUserDefaults] boolForKey:@"AndroidTouchpad"];}
 - (void)applyPointerMode {

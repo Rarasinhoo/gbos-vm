@@ -9,9 +9,11 @@ Boots the image (a snapshot) and stands in for the viewer on the pointer link: i
 token, keeps the link busy with hover moves, and when the guest reports that an app asked for
 pointer capture it locks (Q 1) and sends relative motion and a click. The test app on the image
 logs what it receives; this passes when it got relative mouse motion and the click, and the
-guest reported the release when the app let go. The viewer's own pointer link port (27183)
+guest reported the release when the app let go, and before that, while it hovered over the app,
+Android's pointer took the shapes the app asks for (an I-beam and a hand) and stayed where it was
+steered while hovering (once the helper had learnt Android's motion gain). The viewer's own pointer link port (27183)
 must be free: quit the app first."""
-import hashlib, hmac, os, secrets, select, signal, socket, subprocess, sys, threading, time
+import hashlib, hmac, os, re, secrets, select, signal, socket, subprocess, sys, threading, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -46,11 +48,13 @@ def main():
         hello = f.readline().decode().split()
         assert hello[0] == 'a' and hmac.compare_digest(hello[2], mac(token, f'gbos-guest:{host_nonce}:{hello[1]}')), hello
         send('A ' + mac(token, f'gbos-host:{hello[1]}:{host_nonce}'))
+        send('W 0 0')  # the high-resolution wheel, which the viewer creates on every link
         print('link up', flush=True)
         stop = threading.Event()
 
         def hover():  # keeps the guest watching for pointer capture (it only does while in use)
-            while not stop.wait(1): send('M 600 400')
+            x = 0
+            while not stop.wait(0.7): x = (x + 150) % 1800; send(f'M {x + 60} 500')
         threading.Thread(target=hover, daemon=True).start()
         released = False
         deadline = time.time() + 300
@@ -76,8 +80,14 @@ def main():
     print('\n'.join(events[-12:] + app[-40:]))
     rel = [l for l in app if 'captured action=2' in l and 'source=0x20004' in l]  # ACTION_MOVE, SOURCE_MOUSE_RELATIVE
     click = any('captured action=11' in l for l in app)                              # ACTION_BUTTON_PRESS
-    ok = bool(rel) and click and released
-    print(f'\nrelative moves {len(rel)}, click {click}, release reported {released}: {"PASS" if ok else "FAIL"}')
+    # The app asks for an I-beam over its left half and a hand over its right (PointerIcon types)
+    shapes = {int(m) for m in re.findall(r'VM_POINTER_TEST shape resolvedPointerType: (\d+)', log)}
+    # Drift while hovering (Android puts the pointer back elsewhere when capture ends; that's fine)
+    hover = app[:next((i for i, l in enumerate(app) if 'mouse locked' in l), len(app))]
+    drift = [l for l in hover if 'corrected' in l]
+    ok = bool(rel) and click and released and {1008, 1002} <= shapes and not drift
+    print(f'\nrelative moves {len(rel)}, click {click}, release reported {released}, '
+          f'shapes {sorted(shapes)}, steering corrections {len(drift)}: {"PASS" if ok else "FAIL"}')
     return 0 if ok else 1
 
 

@@ -6,6 +6,8 @@ import android.app.Activity;
 import android.os.Bundle;
 import android.os.Handler;
 import android.util.Log;
+import android.view.MotionEvent;
+import android.view.PointerIcon;
 import android.view.View;
 
 public final class Main extends Activity {
@@ -15,7 +17,12 @@ public final class Main extends Activity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
-        view = new View(this);
+        view = new View(this) {
+            // Cursor shapes for tests/cursor_shapes: a text I-beam on the left half, a hand on the right
+            @Override public PointerIcon onResolvePointerIcon(MotionEvent e, int index) {
+                return PointerIcon.getSystemIcon(getContext(), e.getX(index) < getWidth() / 2f ? PointerIcon.TYPE_TEXT : PointerIcon.TYPE_HAND);
+            }
+        };
         view.setFocusable(true);
         view.setFocusableInTouchMode(true);
         view.setOnCapturedPointerListener((v, e) -> {
@@ -27,7 +34,7 @@ public final class Main extends Activity {
     }
 
     @Override public void onWindowFocusChanged(boolean focused) {
-        if (!focused || asked) return;
+        if (!focused || asked || getIntent().getBooleanExtra("icons", false)) return;
         asked = true;
         view.requestFocus();
         view.requestPointerCapture();
