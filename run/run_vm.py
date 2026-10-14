@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Run the Googlebook VM once with an explicit QEMU command line.
 
-  run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline] [--no-audio] [--no-bluetooth]
+  run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline | --isolated] [--no-audio] [--no-bluetooth]
             [--display WxH] [--memory MIB] [--cpus N]
 
 WORK is the build folder (host/, image/, UTM-beta/). Logs and sockets go to WORK/logs/RUN_NAME.
 The disk is written to unless --snapshot is given. Networking is QEMU user-mode NAT with no
 inbound forwards; --offline removes it (the pointer/clipboard helper then cannot connect).
+--isolated keeps only the pointer/clipboard link: the guest can't reach the internet or any
+service listening on this Mac's loopback (plain NAT maps 10.0.2.2 to the Mac's 127.0.0.1).
 On stop, Android is asked to power off through the guest control channel before QEMU is killed.
 
 Bluetooth: if the Android emulator's netsimd is installed (SDK "emulator" package, or set
 GBOS_NETSIMD), it is started as a virtual Bluetooth controller and Android is told it has
 Bluetooth. Otherwise, or with --no-bluetooth, the guest boots with no Bluetooth at all.
 """
-import argparse, atexit, fcntl, json, math, os, secrets, shutil, signal, socket, subprocess, sys
+import argparse, atexit, fcntl, json, math, os, re, secrets, shutil, signal, socket, subprocess, sys, threading, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -119,11 +121,37 @@ def guest_refresh(host_hz, any_rate=True, cap=120):
     return min((60, 75), key=lambda r: beat(59.95 if r == 60 else 75))
 
 
+def send_token(proc, out, token, host_addr):
+    """Hand the per-boot token to the guest over the serial console, which only this user can
+    reach, once its control service is up. It used to go on the kernel command line, where any
+    guest app that can read ro.boot.* properties could see it."""
+    serial = out / 'serial.log'
+    def seen(marker):
+        # Match at a line start so guest log text can't fake a marker.
+        try: return re.search(rb'(?m)^' + re.escape(marker), serial.read_bytes()) is not None
+        except OSError: return False
+    deadline = time.monotonic() + 300
+    while not seen(b'VM_CONTROL_READY'):
+        if proc.poll() is not None or time.monotonic() > deadline: return
+        time.sleep(.5)
+    err = None
+    for _ in range(6):
+        try: vm_control.send(out, f'VM_TOKEN {token} {host_addr}')
+        except OSError as e: err = e
+        for _ in range(10):
+            if seen(b'VM_CONTROL token set'): return
+            if proc.poll() is not None: return
+            time.sleep(.5)
+    print('WARNING: the guest never acknowledged the input token' + (f' ({err})' if err else '') +
+          '; the pointer/clipboard link will not connect', file=sys.stderr, flush=True)
+
+
 def main():
     a = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     a.add_argument('work'); a.add_argument('name')
     a.add_argument('--seconds', type=int, default=3600)
     a.add_argument('--snapshot', action='store_true'); a.add_argument('--offline', action='store_true')
+    a.add_argument('--isolated', action='store_true')
     a.add_argument('--no-audio', action='store_true'); a.add_argument('--no-bluetooth', action='store_true')
     a.add_argument('--display', default='1920x1200'); a.add_argument('--memory', type=int, default=4096)
     a.add_argument('--cpus', type=int, default=6)
@@ -148,7 +176,12 @@ def main():
     width, height = args.display.split('x')
     refresh = args.refresh or (guest_refresh(args.host_refresh, cap=args.refresh_cap) if args.host_refresh else 75)
     # gfxstream needs our own QEMU build (UTM's has no rutabaga); virgl uses UTM's, repointed.
-    base = work / 'build/qemu-gfx/libqemu-aarch64-softmmu.dylib' if args.gpu == 'gfxstream' else host / 'qemu-aarch64-softmmu'
+    base = host / 'qemu-aarch64-softmmu'
+    if args.gpu == 'gfxstream':
+        # The launcher loads only from its own folder: keep a copy of the gfxstream build there
+        built, base = work / 'build/qemu-gfx/libqemu-aarch64-softmmu.dylib', host / 'qemu-gfx-aarch64-softmmu'
+        if not base.exists() or base.stat().st_mtime < built.stat().st_mtime:
+            shutil.copyfile(built, base.with_suffix('.tmp')); base.with_suffix('.tmp').rename(base)
     if not base.exists(): sys.exit(f'missing: {base} (run build-gfxstream.sh)')
     qemu, edid = qemu_at_refresh(base, refresh), True
     if qemu is None:  # an unknown QEMU build: fall back to the two rates it offers unmodified
@@ -160,14 +193,15 @@ def main():
     lock = (work / 'logs/vm.lock').open('a')
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError: sys.exit('another VM from this folder is already running')
-    out = work / 'logs' / args.name; out.mkdir()
+    # Private: holds the token and the QMP, SPICE and serial sockets.
+    out = work / 'logs' / args.name; out.mkdir(mode=0o700)
     # Random per-boot secret for the pointer/clipboard link (see guest/input).
     token = secrets.token_hex(16)
-    (out / 'token').write_text(token); os.chmod(out / 'token', 0o600)
+    with os.fdopen(os.open(out / 'token', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as f: f.write(token)
     (out / 'refresh').write_text(f'{refresh:g}\n')  # the viewer locks its presentation to it
 
     gpu = 'virtio-gpu-gl-pci' if args.gpu == 'virgl' else 'virtio-gpu-rutabaga-pci'
-    netsim, cmdline = None, CMDLINE + ' androidboot.gbos_token=' + token
+    netsim, cmdline = None, CMDLINE
     netsimd = None if args.no_bluetooth else find_netsimd()
     if netsimd:
         netsim, bt_port = start_netsimd(netsimd, out)
@@ -193,7 +227,9 @@ def main():
            '-serial', 'chardev:serial0', '-qmp', 'unix:qmp.sock,server=on,wait=off']
     if args.snapshot: cmd.append('-snapshot')
     if not args.offline:
-        cmd += ['-netdev', 'user,id=googlebooknet,ipv6=off',
+        # Isolated: only the one forward to the viewer's loopback port.
+        isolate = ',restrict=on,guestfwd=tcp:10.0.2.100:27183-cmd:/usr/bin/nc 127.0.0.1 27183' if args.isolated else ''
+        cmd += ['-netdev', 'user,id=googlebooknet,ipv6=off' + isolate,
                 '-device', 'usb-net,id=ethernet,netdev=googlebooknet,bus=xhci.0,mac=52:54:00:12:34:56']
     if netsim:
         # /dev/hvc0 in the guest; the Bluetooth service there speaks HCI over it.
@@ -201,7 +237,8 @@ def main():
                 '-device', 'virtconsole,chardev=bluetooth']
     if not args.no_audio:
         cmd += ['-audiodev', 'coreaudio,id=audio0', '-device', 'usb-audio,audiodev=audio0,bus=xhci.0']
-    env = dict(os.environ, VM_QEMU_LIBRARY=str(qemu),
+    # The launcher loads only builds from its own folder, chosen by file name
+    env = dict(os.environ, VM_QEMU_LIBRARY=qemu.name,
                DYLD_FRAMEWORK_PATH=str(utm / 'Contents/Frameworks'),
                RENDER_SERVER_EXEC_PATH=str(host / 'virgl_render_server'),
                VK_DRIVER_FILES=str(utm / 'Contents/Resources/vulkan/icd.d/MoltenVK_icd.json'),
@@ -220,6 +257,7 @@ def main():
     with (out / 'host.log').open('wb') as log:
         proc = subprocess.Popen(cmd, cwd=out, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         print('PID', proc.pid, 'logs', out, flush=True)
+        threading.Thread(target=send_token, args=(proc, out, token, '10.0.2.100' if args.isolated else '10.0.2.2'), daemon=True).start()
         def interrupt(signum, frame): raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupt)
         rc = None

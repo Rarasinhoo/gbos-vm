@@ -53,9 +53,13 @@ We build and test on one machine (M5, 16 GB, macOS 27). A couple of people have 
 
 Android shows your Mac's battery: its level, and whether it is charging (a VM has no battery of its own, so it used to read empty). Quitting (or closing the window) shuts Android down properly. Your data lives in `work/image/googlebook.raw` and sticks around between runs.
 
-**Settings** (`⌘,`) has the pointer mode, resolution, memory, CPU cores, and toggles for networking, audio and Bluetooth. Pointer mode changes right away; everything else is a VM option, so it applies the next time you start it.
+**Settings** (`⌘,`) has the pointer mode, clipboard, resolution, memory, CPU cores, and toggles for networking, audio and Bluetooth. Pointer mode and clipboard change right away; everything else is a VM option, so it applies the next time you start it.
 
-Resolution defaults to your display's native pixels at 16:10, and Android's UI is sized the way macOS sizes its own (density 320 at native resolution on a Retina screen, macOS's 2x). On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel.
+Resolution defaults to your display's native pixels at 16:10, and Android's UI is sized the way macOS sizes its own (density 320 at native resolution on a Retina screen, macOS's 2x). On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel. Settings also offers 1080p, 1440p, 4K and 3440 × 1440 ultrawide.
+
+**Clipboard.** `⌘V` pastes the Mac clipboard into the guest, and that is the only time it is sent. Copying from Android to the Mac is off by default; enable it in Settings if you trust what you run in the guest.
+
+**Isolate from this Mac** (Settings, experimental) blocks the internet and your Mac's local services from the guest, keeping only the pointer and clipboard link. Normal networking lets the guest reach your Mac's `127.0.0.1` through `10.0.2.2`.
 
 ### Updating
 
@@ -79,7 +83,7 @@ There are two integrated modes where the pointer moves in and out of the window 
 - **Android cursor.** The guest draws the pointer, so it changes shape properly (I-beams, resize arrows). It trails your hand a little, and Android sees it as a stylus, which gets weird in places.
 - **Mac cursor.** Instant, but it's always an arrow.
 
-Switch in the **Pointer** menu, in Settings, or with `⌃⌘M`. Your choice is remembered, and clipboard sync works in all three.
+Switch in the **Pointer** menu, in Settings, or with `⌃⌘M`. Your choice is remembered, and `⌘V` paste works in all three.
 
 ## System Structure
 
@@ -87,9 +91,11 @@ The image starts as Google's unmodified recovery download. We don't touch the sy
 
 - **Software KeyMint and Gatekeeper** instead of hardware-backed ones. Your keys aren't protected by a secure element, because there isn't one.
 - **No verified boot on the vendor partition.** The other partitions keep their original verity; the one we modify can't.
-- **Three extra SELinux rules**, all narrowly about graphics buffer sharing. SELinux stays enforcing.
+- **Three extra SELinux rules**, all narrowly about graphics buffer sharing. SELinux stays enforcing. They apply to `platform_app`, `priv_app` and `priv_app_36`, for the graphics allocator's shared memory only.
+- **No lock screen, unlocked boot state.** Setup is skipped and the screen stays on. Keys are software only and sit on the same disk as your data, so keep `work/image/googlebook.raw` private (the build makes it readable only by you).
+- **A guest log.** `work/logs/<run>/serial.log` holds guest console output, including crash excerpts and package names. Nothing prunes old runs.
 - **Cuttlefish's Bluetooth service** instead of the Qualcomm one, talking to a virtual radio on your Mac over a virtual serial port. The radio listens on `127.0.0.1` with no password, so another program on your Mac could join it and show up as a nearby Bluetooth device. Turn Bluetooth off in Settings if that bothers you.
-- **A helper running as the Android shell user** that takes pointer and clipboard input from the viewer. It only accepts a host that presents a random per-boot token, and it listens to nothing — it connects out to `127.0.0.1` on your Mac.
+- **A helper running as the Android shell user** that takes pointer and clipboard input from the viewer. It listens to nothing and connects out to `127.0.0.1` on your Mac. Both ends prove a random token to each other before anything else is sent. The token reaches Android over the serial console, into a file only the shell user can read.
 
 So: treat it like a dev VM. It's great for poking at the OS. I wouldn’t daily drive it or anything, but I’m sure some freaks (laudatory) will try.
 
