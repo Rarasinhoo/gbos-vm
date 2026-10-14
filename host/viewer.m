@@ -368,7 +368,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  // Size Android's UI the way macOS sizes its own: 160 dpi per guest pixel per screen point, so
  // at the panel's native pixels on a Retina screen that is 320, macOS's own 2x.
  self.guestDensity=guestDensity([res integerValue],self.window.screen?:NSScreen.mainScreen);
- NSDateFormatter *f=[NSDateFormatter new];f.dateFormat=@"yyyyMMdd-HHmmss";NSString *name=[@"desktop-" stringByAppendingString:[f stringFromDate:[NSDate date]]];
+ NSDateFormatter *f=[NSDateFormatter new];f.locale=[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];f.dateFormat=@"yyyyMMdd-HHmmss";NSString *name=[@"desktop-" stringByAppendingString:[f stringFromDate:[NSDate date]]];
  self.runDir=[[work stringByAppendingPathComponent:@"logs"] stringByAppendingPathComponent:name];
  NSMutableArray *args=[@[runner,work,name,@"--display",res,@"--memory",[[d objectForKey:@"MemoryMiB"] description],@"--cpus",[[d objectForKey:@"CPUs"] description]] mutableCopy];
  if(![d boolForKey:@"Networking"])[args addObject:@"--offline"];
