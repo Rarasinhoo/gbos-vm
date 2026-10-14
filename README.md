@@ -58,7 +58,7 @@ Resolution defaults to your display's native pixels at 16:10, and Android's UI i
 
 **Clipboard.** `⌘V` pastes the Mac clipboard into the guest, and that is the only time it is sent. Copying from Android to the Mac is off by default; enable it in Settings if you trust what you run in the guest.
 
-**Network** (Settings) is *Internet* by default. *Isolated from this Mac* (experimental) blocks the internet and your Mac's local services from the guest, keeping only the pointer and clipboard link; normal networking lets the guest reach your Mac's `127.0.0.1` through `10.0.2.2`. *Off* removes networking, and with it the pointer and clipboard link.
+**Network** (Settings) is *Internet* by default. *Isolated from this Mac* (experimental) blocks the internet and your Mac's local services from the guest, keeping only the pointer and clipboard link; normal networking lets the guest reach your Mac's `127.0.0.1` through `10.0.2.2`. *Off* removes networking, and with it the pointer and clipboard link. *Same network as this Mac* puts Android on your real network as one more device, so your phone can find it (Quick Share, Better Together). It needs a small root service once: run `sudo run/lan-setup.sh` (it bridges the network the Mac is on now; run it again if you switch from Wi-Fi to Ethernet, or `--remove` to uninstall). Wi-Fi that keeps devices apart (some office and hotel networks) blocks it.
 
 ### Updating
 

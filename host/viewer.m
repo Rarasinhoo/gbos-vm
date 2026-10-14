@@ -425,6 +425,8 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
    [NSApp replyToApplicationShouldTerminate:YES];
   }
   else if(me.connection)[NSApp terminate:nil];   // Android shut itself down
+  else if([[[NSUserDefaults standardUserDefaults] stringForKey:@"Network"] isEqualToString:@"lan"]&&![[NSFileManager defaultManager] fileExistsAtPath:@"/opt/homebrew/var/run/googlebook-lan.sock"])
+   [me fail:[NSString stringWithFormat:@"Settings > Network is \"Same network as this Mac\", which needs a one-time setup. In Terminal, run:\n\nsudo %@/run/lan-setup.sh\n\nor choose another network in Settings.",[[NSBundle.mainBundle objectForInfoDictionaryKey:@"GBOSWork"] stringByDeletingLastPathComponent]]];
   else [me fail:@"The VM exited before its display came up. Another Googlebook VM may already be running; otherwise check the newest folder under logs/."];
  });};
  NSError *err=nil;if(![t launchAndReturnError:&err]){[self fail:err.localizedDescription];return;}

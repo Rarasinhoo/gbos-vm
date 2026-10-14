@@ -10,7 +10,7 @@
 MODE="${1:-ask}"
 # The last line is the gfxstream graphics build (renderer in Rust and Bazel, QEMU's own devices)
 BREW_FORMULAE="erofs-utils e2fsprogs lz4 pkgconf
-  rust cmake bazelisk libslirp spice-protocol spice-server libusb usbredir"
+  rust cmake bazelisk libslirp spice-protocol spice-server libusb usbredir socket_vmnet"
 SDK_BUILD_TOOLS="build-tools;36.0.0"; SDK_PLATFORM="platforms;android-36"
 
 missing=(); manual=()
