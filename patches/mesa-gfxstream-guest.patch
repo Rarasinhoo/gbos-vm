@@ -30,7 +30,7 @@ index c54f57b..95d5c64 100644
  #====================================#
  #   Standard deps                    #
 diff --git a/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp b/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp
-index 6dad6da..c786e43 100644
+index 6dad6da..c8e28dd 100644
 --- a/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp
 +++ b/src/gfxstream/guest/vulkan/gfxstream_vk_device.cpp
 @@ -157,6 +157,10 @@ static std::vector<const char*> filteredDeviceExtensionNames(
@@ -44,7 +44,7 @@ index 6dad6da..c786e43 100644
          } else if (!isGuestEmulatedDeviceExtension(extName)) {
              retList.push_back(extName);
          }
-@@ -213,6 +217,14 @@ static VkResult gfxstream_vk_physical_device_init(
+@@ -213,6 +217,16 @@ static VkResult gfxstream_vk_physical_device_init(
          physical_device->doImageDrmFormatModifierEmulation = false;
      }
  
@@ -54,12 +54,14 @@ index 6dad6da..c786e43 100644
 +    // flat-shaded value varies within a primitive. Without it, Chrome and every other GLES 3 app
 +    // fail to start.
 +    physical_device->doProvokingVertexEmulation = !supported_extensions.EXT_provoking_vertex;
++    gfxstream::vk::ResourceTracker::get()->provokingVertexEmulated =
++        physical_device->doProvokingVertexEmulation;
 +    supported_extensions.EXT_provoking_vertex = true;
 +
      struct vk_physical_device_dispatch_table dispatch_table;
      memset(&dispatch_table, 0, sizeof(struct vk_physical_device_dispatch_table));
      vk_physical_device_dispatch_table_from_entrypoints(
-@@ -562,6 +574,15 @@ VkResult gfxstream_vk_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -562,6 +576,15 @@ VkResult gfxstream_vk_CreateDevice(VkPhysicalDevice physicalDevice,
          mutableSwapchainMaintenance1Features->swapchainMaintenance1 = VK_FALSE;
      }
  
@@ -120,7 +122,7 @@ index c4df330..0a1f489 100644
                          ahbFormatProps->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_R;
                          break;
 diff --git a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
-index e73426e..cf3da96 100644
+index e73426e..894c520 100644
 --- a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
 @@ -2130,6 +2130,12 @@ void ResourceTracker::on_vkGetPhysicalDeviceFeatures2(void*, VkPhysicalDevice,
@@ -136,6 +138,55 @@ index e73426e..cf3da96 100644
      }
  }
  
+@@ -7796,9 +7802,31 @@ VkResult ResourceTracker::on_vkCreateGraphicsPipelines(
+             }
+         }
+     }
+-    return enc->vkCreateGraphicsPipelines(device, pipelineCache, localCreateInfos.size(),
+-                                          localCreateInfos.data(), pAllocator, pPipelines,
+-                                          true /* do lock */);
++    // An emulated VK_EXT_provoking_vertex: the host never enabled it, so keep its rasterization
++    // struct (which ANGLE always chains) away from it. The chain belongs to the caller: unlink
++    // it for the call and put it back.
++    std::vector<std::pair<VkBaseOutStructure*, VkBaseOutStructure*>> unlinked;
++    if (provokingVertexEmulated) {
++        for (VkGraphicsPipelineCreateInfo& info : localCreateInfos) {
++            if (!info.pRasterizationState) continue;
++            auto* prev = (VkBaseOutStructure*)info.pRasterizationState;
++            while (prev->pNext) {
++                if (prev->pNext->sType ==
++                    VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT) {
++                    unlinked.emplace_back(prev, prev->pNext);
++                    prev->pNext = prev->pNext->pNext;
++                } else {
++                    prev = prev->pNext;
++                }
++            }
++        }
++    }
++    VkResult result = enc->vkCreateGraphicsPipelines(device, pipelineCache,
++                                                     localCreateInfos.size(),
++                                                     localCreateInfos.data(), pAllocator,
++                                                     pPipelines, true /* do lock */);
++    for (auto it = unlinked.rbegin(); it != unlinked.rend(); ++it) it->first->pNext = it->second;
++    return result;
+ }
+ 
+ uint32_t ResourceTracker::getApiVersionFromInstance(VkInstance instance) {
+diff --git a/src/gfxstream/guest/vulkan_enc/ResourceTracker.h b/src/gfxstream/guest/vulkan_enc/ResourceTracker.h
+index c7e525d..f1a729d 100644
+--- a/src/gfxstream/guest/vulkan_enc/ResourceTracker.h
++++ b/src/gfxstream/guest/vulkan_enc/ResourceTracker.h
+@@ -125,6 +125,9 @@ class ResourceTracker {
+     ~ResourceTracker();
+     static ResourceTracker* get();
+ 
++    // VK_EXT_provoking_vertex is offered by the guest alone (see gfxstream_vk_physical_device_init)
++    bool provokingVertexEmulated = false;
++
+     using HostConnectionGetFunc = GfxStreamConnectionManager* (*)();
+     using VkEncoderGetFunc = VkEncoder* (*)(GfxStreamConnectionManager*);
+     using CleanupCallback = std::function<void()>;
 diff --git a/src/gfxstream/guest/vulkan_enc/gfxstream_vk_private.h b/src/gfxstream/guest/vulkan_enc/gfxstream_vk_private.h
 index a52fdeb..6a545bd 100644
 --- a/src/gfxstream/guest/vulkan_enc/gfxstream_vk_private.h

@@ -39,7 +39,7 @@ service vendor.graphics.allocator /vendor/bin/hw/android.hardware.graphics.alloc
  # gfxstream's driver reads as such. One composition client, no wide colour or HDR.
  props={'ro.hardware.egl':'angle','ro.hardware.vulkan':'ranchu','ro.hardware.gralloc':'minigbm','ro.hwui.use_vulkan':'true',
         'debug.renderengine.backend':'skiavkthreaded','debug.renderengine.vulkan':'true','debug.renderengine.graphite_desktop_optin':'false',
-        'debug.hwui.renderer':'skiavk','ro.gfx.angle.supported':'false','ro.vendor.hwcomposer.mode':'client',
+        'debug.hwui.renderer':'skiavk','ro.vendor.hwcomposer.mode':'client',
         'ro.surface_flinger.has_wide_color_display':'false','ro.surface_flinger.has_HDR_display':'false','ro.vendor.hwc.drop_drm_master':'0'}
  b,label,mode=files['build.prop']  # keeps what the caller already added (no StrongBox, say)
  lines=[l for l in b.decode().splitlines() if l.split('=',1)[0] not in props]

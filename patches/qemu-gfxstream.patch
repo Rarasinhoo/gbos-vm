@@ -1,7 +1,7 @@
 diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
 --- a/hw/display/virtio-gpu-rutabaga.c	2026-07-27 00:50:42
-+++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-14 11:35:19
-@@ -12,7 +12,31 @@
++++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-14 12:04:53
+@@ -12,7 +12,42 @@
  
  #include <glib/gmem.h>
  #include <rutabaga_gfx/rutabaga_gfx_ffi.h>
@@ -17,7 +17,13 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
 +typedef int (*get_metal_texture_fn)(uint32_t res_handle, void **texture);
 +static bool metal_scanout[VIRTIO_GPU_MAX_SCANOUTS];
 +
-+static get_metal_texture_fn rutabaga_metal_texture_fn(void)
++/*
++ * Android flips between a few buffers every frame. Their textures live as long as the resources,
++ * so ask gfxstream once per resource (it takes the renderer's lock) and forget it on unref.
++ */
++static GHashTable *metal_textures;
++
++static void *rutabaga_metal_texture(uint32_t resource_id)
 +{
 +    static get_metal_texture_fn fn;
 +    static bool looked;
@@ -25,15 +31,32 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
 +        looked = true;
 +        fn = (get_metal_texture_fn)dlsym(RTLD_DEFAULT,
 +                                         "stream_renderer_resource_get_metal_texture");
++        metal_textures = g_hash_table_new(NULL, NULL);
 +    }
-+    return fn;
++    void *texture = g_hash_table_lookup(metal_textures, GUINT_TO_POINTER(resource_id));
++    if (!texture && fn && fn(resource_id, &texture) == 0 && texture) {
++        g_hash_table_insert(metal_textures, GUINT_TO_POINTER(resource_id), texture);
++    }
++    return texture;
 +}
 +#endif
 +
  #define CHECK(condition, cmd)                                                 \
      do {                                                                      \
          if (!(condition)) {                                                   \
-@@ -268,6 +292,13 @@
+@@ -155,6 +190,11 @@
+     int32_t result;
+     VirtIOGPURutabaga *vr = VIRTIO_GPU_RUTABAGA(g);
+ 
++#ifdef CONFIG_METAL
++    if (metal_textures) {
++        g_hash_table_remove(metal_textures, GUINT_TO_POINTER(res->resource_id));
++    }
++#endif
+     result = rutabaga_resource_unref(vr->rutabaga, res->resource_id);
+     if (result) {
+         error_setg_errno(errp,
+@@ -268,6 +308,13 @@
          return;
      }
  
@@ -47,7 +70,7 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
      transfer.x = 0;
      transfer.y = 0;
      transfer.z = 0;
-@@ -306,6 +337,9 @@
+@@ -306,6 +353,9 @@
      scanout = &vb->scanout[ss.scanout_id];
  
      if (ss.resource_id == 0) {
@@ -57,16 +80,14 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
          dpy_gfx_replace_surface(scanout->con, NULL);
          dpy_gl_scanout_disable(scanout->con);
          return;
-@@ -314,6 +348,29 @@
+@@ -314,6 +364,27 @@
      res = virtio_gpu_find_resource(g, ss.resource_id);
      CHECK(res, cmd);
  
 +#ifdef CONFIG_METAL
 +    {
-+        get_metal_texture_fn get_texture = rutabaga_metal_texture_fn();
-+        void *texture = NULL;
-+        int rc = get_texture ? get_texture(ss.resource_id, &texture) : -1;
-+        if (rc == 0 && texture) {
++        void *texture = rutabaga_metal_texture(ss.resource_id);
++        if (texture) {
 +            ScanoutTextureNative native = {
 +                .type = SCANOUT_TEXTURE_NATIVE_TYPE_METAL,
 +                .handle = texture,
@@ -87,7 +108,7 @@ diff -ruN a/hw/display/virtio-gpu-rutabaga.c b/hw/display/virtio-gpu-rutabaga.c
      if (!res->image) {
          pixman_format_code_t pformat;
          pformat = virtio_gpu_get_pixman_format(res->format);
-@@ -1030,6 +1087,13 @@
+@@ -1030,6 +1101,13 @@
              builder.channels = &channels;
          }
      }

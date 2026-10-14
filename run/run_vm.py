@@ -197,7 +197,7 @@ def main():
         cmdline += ' androidboot.product.vendor.sku=vmbt'
     print('bluetooth:', f'virtual controller ({netsimd})' if netsimd else 'none', flush=True)
 
-    cmd = [str(host / 'qemu-interop'), '-L', str(utm / 'Contents/Resources/qemu'), '-nodefaults', '-vga', 'none',
+    cmd = [str(host / 'qemu-interop'), '-nodefaults', '-vga', 'none',
            '-nic', 'none', '-device', gpu + ',hostmem=8G,gfxstream-vulkan=on' + os.environ.get('GBOS_GFXSTREAM_DEVICE', ''),
            '-global', f'{gpu}.xres={width}', '-global', f'{gpu}.yres={height}',
            '-cpu', 'host', '-smp', f'cpus={args.cpus},sockets=1,cores={args.cpus},threads=1',
@@ -235,7 +235,7 @@ def main():
     # The launcher loads only builds from its own folder, chosen by file name
     env = dict(os.environ, VM_QEMU_LIBRARY=qemu.name,
                DYLD_FRAMEWORK_PATH=str(utm / 'Contents/Frameworks'),
-               ANGLE_DEFAULT_PLATFORM='metal', XDG_RUNTIME_DIR=str(out), TMPDIR=str(out),
+               ANGLE_DEFAULT_PLATFORM='metal', TMPDIR=str(out),
                # HVF cannot map Metal's own memory into the guest: give gfxstream ordinary memory
                # for everything the guest maps, imported into Vulkan (VK_EXT_external_memory_host).
                # Android's UI renderer insists on two graphics queues; MoltenVK runs with one, so

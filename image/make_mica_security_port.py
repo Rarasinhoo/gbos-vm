@@ -69,11 +69,10 @@ on init
 for n in ['keymint','secureclock','sharedsecret']:
  name=f'android.hardware.security.{n}-service.xml'
  add('etc/vintf/manifest/vm-'+name,ext('/etc/vintf/'+name),'vendor_configs_file')
-if '--graphics' in sys.argv:
- from mica_graphics_port import apply
- apply(add,files,GUEST)
- # Tells run_vm.py this image is for the gfxstream device
- (O/'gfxstream.json').write_text(json.dumps({'graphics':'gfxstream','driver_sha256':hashlib.sha256(files['lib64/hw/vulkan.ranchu.so'][0]).hexdigest()})+'\n')
+from mica_graphics_port import apply
+apply(add,files,GUEST)
+# Tells run_vm.py this image is for the gfxstream device
+(O/'gfxstream.json').write_text(json.dumps({'graphics':'gfxstream','driver_sha256':hashlib.sha256(files['lib64/hw/vulkan.ranchu.so'][0]).hexdigest()})+'\n')
 if '--self-test' in sys.argv:
  # Test images only: graphics self-tests at every boot (see guest_vulkan_startup.sh). The probe
  # runs in shell, which already belongs to gpu_sphal_domain.
@@ -91,21 +90,18 @@ on post-fs-data
     start vm-vulkan-probe
 ''','vendor_configs_file')
 extra_dirs,new_dirs=[],['lib64/vm_keymint']
-if '--bluetooth' in sys.argv:
- from mica_bluetooth_port import apply as bluetooth
- old,new=bluetooth(add,original,files);extra_dirs+=old;new_dirs+=new
-if '--quiet-absent-hardware' in sys.argv:
- # The VM has no TPM or Trusty. Left alone, init restarts these services (and dumps a
- # tombstone) every 5 seconds. Disable them before they first start. (A stop-on-restart
- # trigger does not work for the TPM daemon: a vendor script cannot watch its init.svc property.)
- add('etc/init/vm-absent-hardware.rc',b'''on early-init
+from mica_bluetooth_port import apply as bluetooth
+old,new=bluetooth(add,original,files);extra_dirs+=old;new_dirs+=new
+# The VM has no TPM or Trusty. Left alone, init restarts these services (and dumps a
+# tombstone) every 5 seconds. Disable them before they first start. (A stop-on-restart
+# trigger does not work for the TPM daemon: a vendor script cannot watch its init.svc property.)
+add('etc/init/vm-absent-hardware.rc',b'''on early-init
     stop android.system.desktop.security.gscd
     stop vendor.secretkeeper.trusty
 ''','vendor_configs_file')
-if '--host-control' in sys.argv:
- # Fixed-verb control channel (power off, paste, density) read from the serial console.
- add('bin/vm-host-control.sh',(R/'scripts/guest_host_control.sh').read_bytes(),'vendor_shell_exec',0o755)
- add('etc/init/vm-host-control.rc',b'''service vm-host-control /system/bin/sh /vendor/bin/vm-host-control.sh
+# Fixed-verb control channel (power off, token, density, diagnostics) read from the serial console.
+add('bin/vm-host-control.sh',(R/'scripts/guest_host_control.sh').read_bytes(),'vendor_shell_exec',0o755)
+add('etc/init/vm-host-control.rc',b'''service vm-host-control /system/bin/sh /vendor/bin/vm-host-control.sh
     disabled
     user shell
     group shell graphics log readproc input
@@ -115,11 +111,10 @@ if '--host-control' in sys.argv:
 on post-fs-data
     start vm-host-control
 ''','vendor_configs_file')
-if '--host-input' in sys.argv:
- # Absolute pointer and clipboard helper (scrcpy-style injection as shell); see scripts/guest_input.
- add('etc/vm-input.jar',(GUEST/'vm-input.jar').read_bytes(),'vendor_configs_file')
- add('bin/vm-input-service.sh',(R/'scripts/guest_input_service.sh').read_bytes(),'vendor_shell_exec',0o755)
- add('etc/init/vm-input.rc',b'''service vm-input /system/bin/sh /vendor/bin/vm-input-service.sh
+# Absolute pointer and clipboard helper (scrcpy-style injection as shell); see scripts/guest_input.
+add('etc/vm-input.jar',(GUEST/'vm-input.jar').read_bytes(),'vendor_configs_file')
+add('bin/vm-input-service.sh',(R/'scripts/guest_input_service.sh').read_bytes(),'vendor_shell_exec',0o755)
+add('etc/init/vm-input.rc',b'''service vm-input /system/bin/sh /vendor/bin/vm-input-service.sh
     disabled
     user shell
     group shell input log inet readproc uhid
@@ -160,29 +155,24 @@ on post-fs-data
     setprop log.tag.InputDispatcherInboundEvent DEBUG
     start vm-perf-test
 ''','vendor_configs_file')
-if '--audio' in sys.argv:
- from mica_audio_port import apply
- apply(add)
- (O/'audio-port.json').write_text(json.dumps({'source':'official Cuttlefish build 16373615 audio APEX','deselected':'com.android.hardware.audio.desktop','host_audio':'none'})+'\n')
-if '--camera' in sys.argv:
- from mica_camera_port import apply
- (O/'camera-port.json').write_text(json.dumps(apply(add,original,raw,off))+'\n')
-if '--vm-compat' in sys.argv:
- # Keep A/B boot-control behaviour without the ChromeOS firmware calls.
- add('bin/hw/android.hardware.boot-service.android-desktop',(R/'artifacts/security-port-review/boot-service.default').read_bytes(),'hal_bootctl_default_exec',0o755)
- (O/'original-policy').write_bytes(original('etc/selinux/precompiled_sepolicy'))
- subprocess.run([str(TOOLS/'guest_graphics_memfd_policy'),str(O/'original-policy'),str(O/'graphics-policy')],check=True)
- m=metadata(raw,'/etc/selinux/precompiled_sepolicy',off)
- add('etc/selinux/precompiled_sepolicy',(O/'graphics-policy').read_bytes(),m['xattrs']['security.selinux'].decode().split(':')[2],m['mode']&0o7777)
- (O/'vm-compat.json').write_text(json.dumps({'boot_control':'official AOSP default, original service identity','selinux':'enforcing; only three observed graphics clients get read/write/map/getattr on allocator memfd buffers'})+'\n')
-if '--locksettings' in sys.argv:
- from mica_locksettings_port import apply
- apply(add)
- (O/'locksettings-port.json').write_text(json.dumps({'gatekeeper':'official AOSP nonsecure build 16373615','weaver':'not advertised; AOSP optional-service fallback','security':'software-only VM-generated secrets; not hardware-backed'})+'\n')
-if '--offline-desktop' in sys.argv:
- # Equivalent provisioning flags to official AOSP Provision DefaultActivity,
- # applied to fresh userdata, before any account exists.
- add('etc/init/vm-offline-desktop.rc',b'''service vm-offline-desktop /system/bin/sh /vendor/bin/vm-offline-desktop.sh
+from mica_audio_port import apply
+apply(add)
+(O/'audio-port.json').write_text(json.dumps({'source':'official Cuttlefish build 16373615 audio APEX','deselected':'com.android.hardware.audio.desktop','host_audio':'none'})+'\n')
+from mica_camera_port import apply
+(O/'camera-port.json').write_text(json.dumps(apply(add,original,raw,off))+'\n')
+# Keep A/B boot-control behaviour without the ChromeOS firmware calls.
+add('bin/hw/android.hardware.boot-service.android-desktop',(R/'artifacts/security-port-review/boot-service.default').read_bytes(),'hal_bootctl_default_exec',0o755)
+(O/'original-policy').write_bytes(original('etc/selinux/precompiled_sepolicy'))
+subprocess.run([str(TOOLS/'guest_graphics_memfd_policy'),str(O/'original-policy'),str(O/'graphics-policy')],check=True)
+m=metadata(raw,'/etc/selinux/precompiled_sepolicy',off)
+add('etc/selinux/precompiled_sepolicy',(O/'graphics-policy').read_bytes(),m['xattrs']['security.selinux'].decode().split(':')[2],m['mode']&0o7777)
+(O/'vm-compat.json').write_text(json.dumps({'boot_control':'official AOSP default, original service identity','selinux':'enforcing; only three observed graphics clients get read/write/map/getattr on allocator memfd buffers'})+'\n')
+from mica_locksettings_port import apply
+apply(add)
+(O/'locksettings-port.json').write_text(json.dumps({'gatekeeper':'official AOSP nonsecure build 16373615','weaver':'not advertised; AOSP optional-service fallback','security':'software-only VM-generated secrets; not hardware-backed'})+'\n')
+# Equivalent provisioning flags to official AOSP Provision DefaultActivity,
+# applied to fresh userdata, before any account exists.
+add('etc/init/vm-offline-desktop.rc',b'''service vm-offline-desktop /system/bin/sh /vendor/bin/vm-offline-desktop.sh
     disabled
     oneshot
     user shell
@@ -199,12 +189,11 @@ on property:sys.boot_completed=1
 on boot
     write /sys/power/wake_lock gbos_vm
 ''','vendor_configs_file')
- add('bin/vm-offline-desktop.sh',(R/'scripts/guest_offline_desktop.sh').read_bytes(),'vendor_shell_exec',0o755)
- (O/'offline-desktop.json').write_text(json.dumps({'purpose':'skip first-run setup on fresh userdata','source':'AOSP Provision DefaultActivity provisioning flags','accounts':'none','consumer_onboarding':'not completed'})+'\n')
+add('bin/vm-offline-desktop.sh',(R/'scripts/guest_offline_desktop.sh').read_bytes(),'vendor_shell_exec',0o755)
+(O/'offline-desktop.json').write_text(json.dumps({'purpose':'skip first-run setup on fresh userdata','source':'AOSP Provision DefaultActivity provisioning flags','accounts':'none','consumer_onboarding':'not completed'})+'\n')
 with tarfile.open(O/'overlay.tar','w',format=tarfile.PAX_FORMAT) as t:
  dirs=['.','bin','bin/hw','etc','etc/init','etc/init/hw','etc/selinux','etc/vintf','etc/vintf/manifest','lib64','lib64/hw','lib64/vm_keymint']
- if '--audio' in sys.argv:dirs.append('apex')
- if '--camera' in sys.argv and 'apex' not in dirs:dirs.append('apex')
+ dirs.append('apex')
  dirs+=extra_dirs+new_dirs[1:]
  for n in dirs:
   m=metadata(raw,'/'+n if n!='.' else '/',off) if n not in new_dirs else {'mode':0o40755,'uid':0,'gid':2000,'mtime':1230768000,'xattrs':{'security.selinux':b'u:object_r:vendor_file:s0' if n.startswith('lib64') else b'u:object_r:vendor_configs_file:s0'}}
@@ -240,7 +229,7 @@ subprocess.run([str(D/'fsck.erofs'),str(v)],check=True)
 for n,(b,label,mode) in files.items():
  assert subprocess.check_output([str(D/'dump.erofs'),'--path=/'+n,'--cat',str(v)])==b,n
 for p in ['/etc/init/hw/init.android-desktop.rc','/etc/selinux/precompiled_sepolicy']:
- if p=='/etc/selinux/precompiled_sepolicy' and '--vm-compat' in sys.argv:continue
+ if p=='/etc/selinux/precompiled_sepolicy':continue
  if p[1:] in files:continue  # changed on purpose, and checked against the change above
  assert subprocess.check_output([str(D/'dump.erofs'),'--path='+p,'--cat',str(v)])==subprocess.check_output([str(D/'dump.erofs'),'--offset='+str(off),'--path='+p,'--cat',str(raw)])
 for n in [p for p in dirs if p not in new_dirs]:
@@ -257,5 +246,5 @@ entries=read((base/'vendor_0_platform.cpio').read_bytes());name='first_stage_ram
 mode,b=entries[name];s=b.decode();s='\n'.join(l.replace(',avb=vbmeta','') if l.startswith('vendor ') else l for l in s.splitlines())+'\n'
 ram+=write({name:(mode,s.encode())})
 (O/'initrd.img').write_bytes(subprocess.check_output(['lz4','-l','-c'],input=ram))
-(O/'manifest.json').write_text(json.dumps({'source':'official Android CI 16373615 software KeyMint','changed_mount':'vendor only; stock AVB removed only for modified vendor filesystem','selinux':('enforcing; three graphics-client memfd sharing rules added' if '--vm-compat' in sys.argv else 'enforcing, policy unchanged'),'encryption':'unchanged','files':{n:{'sha256':hashlib.sha256(b).hexdigest(),'label':label,'mode':oct(mode)} for n,(b,label,mode) in files.items()},'vendor_bytes':v.stat().st_size},indent=2)+'\n')
+(O/'manifest.json').write_text(json.dumps({'source':'official Android CI 16373615 software KeyMint','changed_mount':'vendor only; stock AVB removed only for modified vendor filesystem','selinux':'enforcing; three graphics-client memfd sharing rules added','encryption':'unchanged','files':{n:{'sha256':hashlib.sha256(b).hexdigest(),'label':label,'mode':oct(mode)} for n,(b,label,mode) in files.items()},'vendor_bytes':v.stat().st_size},indent=2)+'\n')
 print(O)

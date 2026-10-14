@@ -262,9 +262,8 @@ public final class Input {
                     + "\"configuration\":[{\"type\":100,\"data\":[1,3]},{\"type\":101,\"data\":[273,274,320,330]},{\"type\":103,\"data\":[0,1,24]}],"
                     + "\"abs_info\":[{\"code\":0,\"info\":" + String.format(axis, w - 1) + "},{\"code\":1,\"info\":" + String.format(axis, h - 1) + "},{\"code\":24,\"info\":" + String.format(axis, 255) + "}]}\n").getBytes("UTF-8"));
             o.flush();
-            SystemClock.sleep(1500);
-            if (!uinput.isAlive()) throw new IllegalStateException("uinput exited " + uinput.exitValue());
-            tablet = o; tabletW = w; tabletH = h; tabletDeviceId = findTabletDevice();
+            int device = waitForDevice(uinput, "VM Absolute Pointer");
+            tablet = o; tabletW = w; tabletH = h; tabletDeviceId = device;
             System.out.println("VM_INPUT tablet registered " + w + "x" + h + " device " + tabletDeviceId);
             drain(uinput, "uinput");
             reply("m tablet");
@@ -302,8 +301,7 @@ public final class Input {
                     + "{\"code\":24,\"info\":" + String.format(axis, 255, 0) + "},{\"code\":58,\"info\":" + String.format(axis, 255, 0) + "},"
                     + "{\"code\":48,\"info\":" + String.format(axis, 255, 1) + "},{\"code\":49,\"info\":" + String.format(axis, 255, 1) + "}]}\n").getBytes("UTF-8"));
             o.flush();
-            SystemClock.sleep(1500);
-            if (!touchpadProcess.isAlive()) throw new IllegalStateException("uinput exited " + touchpadProcess.exitValue());
+            waitForDevice(touchpadProcess, "VM Touchpad");
             touchpad = o; padW = w; padH = h;
             java.util.Arrays.fill(slotContact, -1);
             // The Mac decides what is a click (a press, or a tap if the Mac has tap to click), so
@@ -429,8 +427,7 @@ public final class Input {
                 o.write(("{\"id\":1,\"command\":\"register\",\"name\":\"VM Scroll Wheel\",\"vid\":6900,\"pid\":30467,\"bus\":\"usb\","
                         + "\"configuration\":[{\"type\":100,\"data\":[1,2]},{\"type\":101,\"data\":[272]},{\"type\":102,\"data\":[0,1,6,8,11,12]}]}\n").getBytes("UTF-8"));
                 o.flush();
-                SystemClock.sleep(1500);
-                if (!wheelProcess.isAlive()) throw new IllegalStateException("uinput exited " + wheelProcess.exitValue());
+                waitForDevice(wheelProcess, "VM Scroll Wheel");
                 wheelOut = o;
                 drain(wheelProcess, "wheel");
                 System.out.println("VM_INPUT wheel registered");
@@ -491,14 +488,28 @@ public final class Input {
         e.recycle();
     }
 
-    private static int findTabletDevice() {
+    private static int findDevice(String name) {
         try {
             for (int id : InputDevice.getDeviceIds()) {
                 InputDevice d = InputDevice.getDevice(id);
-                if (d != null && "VM Absolute Pointer".equals(d.getName())) return id;
+                if (d != null && name.equals(d.getName())) return id;
             }
         } catch (Throwable t) { System.out.println("VM_INPUT device lookup: " + t); }
         return 0;
+    }
+
+    private static int findTabletDevice() { return findDevice("VM Absolute Pointer"); }
+
+    /** The id of the device a uinput process just registered, once Android has it (or 0 after
+     *  3 s: it may still come, and events written meanwhile are only queued). */
+    private static int waitForDevice(Process process, String name) {
+        long until = SystemClock.uptimeMillis() + 3000;
+        while (true) {
+            if (!process.isAlive()) throw new IllegalStateException("uinput exited " + process.exitValue());
+            int id = findDevice(name);
+            if (id != 0 || SystemClock.uptimeMillis() > until) return id;
+            SystemClock.sleep(30);
+        }
     }
 
     private static void scrollAs(int deviceId, int source, int toolType, float hscroll, float vscroll) throws Exception {

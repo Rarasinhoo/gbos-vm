@@ -134,7 +134,7 @@ index 92707b1..dbe8604 100644
          SPICE_DEBUG("[CocoaSpice] %s:%d", __FUNCTION__, __LINE__);
          g_signal_connect(session, "channel-new",
 diff --git a/Sources/CocoaSpiceRenderer/CSMetalRenderer.m b/Sources/CocoaSpiceRenderer/CSMetalRenderer.m
-index 9c7bad9..98ca10b 100644
+index 9c7bad9..8dc636e 100644
 --- a/Sources/CocoaSpiceRenderer/CSMetalRenderer.m
 +++ b/Sources/CocoaSpiceRenderer/CSMetalRenderer.m
 @@ -94,10 +94,15 @@ @interface CSMetalRenderer ()
@@ -195,7 +195,53 @@ index 9c7bad9..98ca10b 100644
          NSAssert(defaultLibrary, @"Failed to get library from bundle: %@", error);
  
          // Load the vertex function from the library
-@@ -274,18 +294,34 @@ static matrix_float4x4 matrix_scale_translate(CGFloat scale, CGPoint translate)
+@@ -203,6 +223,27 @@ - (void)mtkView:(nonnull MTKView *)view drawableSizeWillChange:(CGSize)size {
+     // Save the size of the drawable as we'll pass these
+     //   values to our vertex shader when we draw
+     [self _setViewportCGSize:size];
++    dispatch_async(dispatch_get_main_queue(), ^{
++        [self _needsRender];
++    });
++}
++
++/// Main thread: there is something new to show. The view's own loop picks it
++/// up on its next tick; locked to the guest clock, that loop is paused (it
++/// would only wake the main thread 120 times a second for nothing), so draw now.
++- (void)_needsRender {
++    self.renderNeedsUpdate = YES;
++    if (_view.paused) {
++        [_view draw];
++    }
++}
++
++- (void)setGuestRefresh:(double)guestRefresh {
++    _guestRefresh = guestRefresh;
++    dispatch_async(dispatch_get_main_queue(), ^{
++        self->_view.enableSetNeedsDisplay = NO;
++        self->_view.paused = [self _clockLocked];
++    });
+ }
+ 
+ - (void)setViewportOrigin:(CGPoint)viewportOrigin {
+@@ -210,7 +251,7 @@ - (void)setViewportOrigin:(CGPoint)viewportOrigin {
+         _viewportOrigin = viewportOrigin;
+         dispatch_async(dispatch_get_main_queue(), ^{
+             self.renderViewportOrigin = viewportOrigin;
+-            self.renderNeedsUpdate = YES;
++            [self _needsRender];
+         });
+     }
+ }
+@@ -220,7 +261,7 @@ - (void)setViewportScale:(CGFloat)viewportScale {
+         _viewportScale = viewportScale;
+         dispatch_async(dispatch_get_main_queue(), ^{
+             self.renderViewportScale = viewportScale;
+-            self.renderNeedsUpdate = YES;
++            [self _needsRender];
+         });
+     }
+ }
+@@ -274,18 +315,34 @@ static matrix_float4x4 matrix_scale_translate(CGFloat scale, CGPoint translate)
  /// Called whenever the view needs to render a frame
  - (void)drawInMTKView:(nonnull MTKView *)view
  {
@@ -237,7 +283,7 @@ index 9c7bad9..98ca10b 100644
          return;
      }
  
-@@ -306,7 +342,68 @@ - (void)drawInMTKView:(nonnull MTKView *)view
+@@ -306,7 +363,68 @@ - (void)drawInMTKView:(nonnull MTKView *)view
                   sampler:self.renderSampler
      renderPassDescriptor:renderPassDescriptor];
  
@@ -307,7 +353,7 @@ index 9c7bad9..98ca10b 100644
  
      [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer) {
          dispatch_async(dispatch_get_main_queue(), ^{
-@@ -318,6 +415,58 @@ - (void)drawInMTKView:(nonnull MTKView *)view
+@@ -318,6 +436,58 @@ - (void)drawInMTKView:(nonnull MTKView *)view
      [commandBuffer commit];
  }
  
@@ -366,7 +412,16 @@ index 9c7bad9..98ca10b 100644
  - (void)renderSouce:(id<CSRenderSource>)renderSource
           copyBuffer:(id<MTLBuffer>)sourceBuffer
               region:(MTLRegion)region
-@@ -371,6 +520,8 @@ - (void)invalidateRenderSource:(id<CSRenderSource>)renderSource
+@@ -358,7 +528,7 @@ - (void)renderSouce:(id<CSRenderSource>)renderSource
+             [self _addDrawCompletion:completion];
+         }
+         self.renderSourceData = sourceData;
+-        self.renderNeedsUpdate = YES;
++        [self _needsRender];
+     });
+ }
+ 
+@@ -371,13 +541,18 @@ - (void)invalidateRenderSource:(id<CSRenderSource>)renderSource
          }
          return;
      }
@@ -375,16 +430,14 @@ index 9c7bad9..98ca10b 100644
  
      dispatch_async(dispatch_get_main_queue(), ^{
          if (completion) {
-@@ -378,6 +529,12 @@ - (void)invalidateRenderSource:(id<CSRenderSource>)renderSource
+             [self _addDrawCompletion:completion];
          }
          self.renderSourceData = sourceData;
-         self.renderNeedsUpdate = YES;
+-        self.renderNeedsUpdate = YES;
 +        self.frameArrived = arrived;
-+        // Locked to the guest clock, draw now: waiting for the view's next
-+        // tick would add up to a refresh of delay before the hold even starts.
-+        if ([self _clockLocked]) {
-+            [self->_view draw];
-+        }
++        // Locked to the guest clock, this draws at once: waiting for a tick
++        // would add up to a refresh of delay before the hold even starts.
++        [self _needsRender];
      });
  }
  

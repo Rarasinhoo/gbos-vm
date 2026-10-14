@@ -39,8 +39,8 @@ python3 scripts/extract_mica_normal.py >"$WORK/build-image.log" 2>&1 || { tail -
 python3 scripts/make_mica_gpu_initrd.py >>"$WORK/build-image.log" 2>&1 || { tail -20 "$WORK/build-image.log"; die "ramdisk failed"; }
 
 say "Vendor overlay, policy and services"
-python3 scripts/make_mica_security_port.py base --graphics --audio --vm-compat --locksettings --offline-desktop \
-  --quiet-absent-hardware --host-control --host-input --bluetooth --camera ${GBOS_IMAGE_FLAGS:-} >>"$WORK/build-image.log" 2>&1 || { tail -30 "$WORK/build-image.log"; die "image assembly failed"; }
+# Test images add --self-test, --perf-test or --stress-test through GBOS_IMAGE_FLAGS
+python3 scripts/make_mica_security_port.py base ${GBOS_IMAGE_FLAGS:-} >>"$WORK/build-image.log" 2>&1 || { tail -30 "$WORK/build-image.log"; die "image assembly failed"; }
 
 say "User data area"
 python3 scripts/expand_mica_userdata.py artifacts/mica/base/googlebook.raw >>"$WORK/build-image.log" 2>&1 \
