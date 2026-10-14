@@ -391,7 +391,6 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   [args addObject:@"--microphone"];
   self.microphone=[[GBMicrophone alloc] initWithSocketPath:[self.runDir stringByAppendingPathComponent:@"mic.sock"]];[self.microphone start];
  }
- NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];t.arguments=args;
  // Pace the guest to the screen the window opens on (see guest_refresh in run_vm.py).
  [args addObjectsFromArray:@[@"--refresh-cap",[[d objectForKey:@"RefreshCap"] description]]];
  [args addObjectsFromArray:@[@"--host-refresh",[NSString stringWithFormat:@"%g",screenRefresh(self.window.screen?:NSScreen.mainScreen)]]];
