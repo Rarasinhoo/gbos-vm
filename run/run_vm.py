@@ -60,6 +60,40 @@ def mac_lan_address():
     return addr if re.fullmatch(r'\d+\.\d+\.\d+\.\d+', addr) else None
 
 
+def qmp(out, *commands):
+    """Run QMP commands on the VM (each a dict), in order."""
+    with socket.socket(socket.AF_UNIX) as s:
+        cwd = os.getcwd(); os.chdir(out)   # macOS limits socket paths to 104 bytes
+        try: s.connect('qmp.sock')
+        finally: os.chdir(cwd)
+        f = s.makefile('rw')
+        f.readline()
+        for c in ({'execute': 'qmp_capabilities'},) + commands:
+            f.write(json.dumps(c) + '\n'); f.flush()
+            while 'return' not in (r := json.loads(f.readline())) and 'error' not in r: pass
+
+
+def follow_lan(proc, out, token, addr):
+    """--lan: when the Mac's network changes (Wi-Fi reconnects, or Wi-Fi to Ethernet), the bridge
+    service bridges again (run/lan-setup.sh) and QEMU reconnects to it. Then the guest needs an
+    address on the new network (its link goes down and up, so Android asks DHCP again) and the
+    pointer link the Mac's new address (a new token line; the viewer listens there too)."""
+    while proc.poll() is None:
+        time.sleep(3)
+        now = mac_lan_address()
+        if not now or now == addr: continue
+        print(f'network changed: the Mac is now {now}', flush=True)
+        addr = now
+        (out / 'host-address').write_text(addr + '\n')
+        time.sleep(5)   # the bridge restarts and QEMU reconnects
+        try:
+            qmp(out, {'execute': 'set_link', 'arguments': {'name': 'ethernet', 'up': False}})
+            time.sleep(1)
+            qmp(out, {'execute': 'set_link', 'arguments': {'name': 'ethernet', 'up': True}})
+            vm_control.send(out, f'VM_TOKEN {token} {addr}')
+        except OSError as e: print('could not follow the network change:', e, flush=True)
+
+
 def find_netsimd():
     # The last two are where prereqs.sh puts the SDK when it installs one through Homebrew.
     sdks = [os.environ.get(k) for k in ('ANDROID_SDK', 'ANDROID_HOME', 'ANDROID_SDK_ROOT')] + [
@@ -241,7 +275,8 @@ def main():
            '-serial', 'chardev:serial0', '-qmp', 'unix:qmp.sock,server=on,wait=off']
     if args.snapshot: cmd.append('-snapshot')
     if args.lan:
-        cmd += ['-netdev', f'stream,id=googlebooknet,server=off,addr.type=unix,addr.path={LAN_SOCKET}',
+        # Reconnects when the bridge service starts over (the Mac's network changed)
+        cmd += ['-netdev', f'stream,id=googlebooknet,server=off,reconnect-ms=1000,addr.type=unix,addr.path={LAN_SOCKET}',
                 '-device', 'usb-net,id=ethernet,netdev=googlebooknet,bus=xhci.0,mac=52:54:00:12:34:56']
         (out / 'host-address').write_text(lan_addr + '\n')   # the viewer listens there too
     elif not args.offline:
@@ -281,6 +316,7 @@ def main():
                                 pass_fds=(lock.fileno(),))
         print('PID', proc.pid, 'logs', out, flush=True)
         threading.Thread(target=send_token, args=(proc, out, token, lan_addr or ('10.0.2.100' if args.isolated else '10.0.2.2')), daemon=True).start()
+        if args.lan: threading.Thread(target=follow_lan, args=(proc, out, token, lan_addr), daemon=True).start()
         def interrupt(signum, frame): raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, interrupt)
         rc = None

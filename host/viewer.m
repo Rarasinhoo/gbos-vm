@@ -235,7 +235,7 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) NSMutableData *ctlOut;          // queued for the guest helper
 @property(nonatomic,strong) dispatch_source_t writeSource;  // waits for room in the socket
 @property(nonatomic,strong) NSMutableArray<dispatch_source_t> *acceptSources;
-@property(nonatomic) BOOL lanListening;
+@property(nonatomic,strong) NSMutableSet<NSString *> *lanListening;   // the Mac's addresses listened on
 @property(nonatomic,strong) dispatch_source_t readSource;
 @property(nonatomic) int ctlFd;
 @property(nonatomic,strong) NSMutableArray *ctlPending; // read sources of connections still proving the token, oldest first
@@ -429,6 +429,18 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   else [me fail:@"The VM exited before its display came up. Another Googlebook VM may already be running; otherwise check the newest folder under logs/."];
  });};
  NSError *err=nil;if(![t launchAndReturnError:&err]){[self fail:err.localizedDescription];return;}
+ // On the Mac's own network, the pointer link comes to the Mac's address there, which run_vm.py
+ // reports (again when it changes, after Wi-Fi reconnects say)
+ if([[d stringForKey:@"Network"] isEqualToString:@"lan"]){
+  self.lanListening=[NSMutableSet set];
+  [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){
+   if(!self.vmTask){[timer invalidate];return;}
+   NSString *lan=[[NSString stringWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"host-address"] encoding:NSUTF8StringEncoding error:nil]
+                  stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+   struct in_addr ia;
+   if(lan.length&&![self.lanListening containsObject:lan]&&inet_pton(AF_INET,lan.UTF8String,&ia)==1&&[self listenControlAt:ia.s_addr onlyVM:YES])[self.lanListening addObject:lan];
+  }];
+ }
  self.vmTask=t;self.window.subtitle=@"Starting the VM…";
  [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer){
   if(!self.vmTask){[timer invalidate];return;}
@@ -439,16 +451,11 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
    if(tk.length)setenv("VM_INPUT_TOKEN",tk.UTF8String,1);
    self.socketPath=[self.runDir stringByAppendingPathComponent:@"spice.sock"];[self connectSpice];return;
   }
-  if(!self.lanListening){
-   NSString *lan=[NSString stringWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"host-address"] encoding:NSUTF8StringEncoding error:nil];
-   struct in_addr ia;
-   if(lan.length&&inet_pton(AF_INET,[lan stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].UTF8String,&ia)==1)self.lanListening=[self listenControlAt:ia.s_addr onlyVM:YES];
-  }
   if(!self.bluetooth&&[d boolForKey:@"Bluetooth"]){
    NSString *port=[NSString stringWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"bluetooth-port"] encoding:NSUTF8StringEncoding error:nil];
    if(port.intValue>0){self.bluetooth=[[GBBluetoothRelay alloc] initWithHCIPort:port.intValue log:[self.runDir stringByAppendingPathComponent:@"bluetooth.log"] phones:[d boolForKey:@"BluetoothPhones"]];[self.bluetooth start];}
   }
-  if(self.densitySent&&(self.lanListening||![[d stringForKey:@"Network"] isEqualToString:@"lan"])&&(self.bluetooth||![d boolForKey:@"Bluetooth"]||[fm fileExistsAtPath:[self.runDir stringByAppendingPathComponent:@"bluetooth-none"]])){[timer invalidate];return;}
+  if(self.densitySent&&(self.bluetooth||![d boolForKey:@"Bluetooth"]||[fm fileExistsAtPath:[self.runDir stringByAppendingPathComponent:@"bluetooth-none"]])){[timer invalidate];return;}
   if(self.densitySent)return;
   // Once Android is up, match the display density to the resolution (the setting persists).
   NSData *log=[NSData dataWithContentsOfFile:[self.runDir stringByAppendingPathComponent:@"serial.log"]];
@@ -548,17 +555,26 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
 // macOS lets only root attach a VM to a network interface. Installed once, with the usual macOS
 // password prompt. YES when it's there.
 static NSString *const kBridgeSocket=@"/opt/homebrew/var/run/googlebook-lan.sock";
+static int bridgeVersion(NSString *path) {
+ NSString *t=[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+ NSTextCheckingResult *m=[[NSRegularExpression regularExpressionWithPattern:@"(?:VERSION=|version )([0-9]+)" options:0 error:nil] firstMatchInString:t?:@"" options:0 range:NSMakeRange(0,t.length)];
+ return m?[t substringWithRange:[m rangeAtIndex:1]].intValue:0;
+}
 - (BOOL)setUpNetworkBridge {
- if([[NSFileManager defaultManager] fileExistsAtPath:kBridgeSocket])return YES;
- NSAlert *a=[NSAlert new];a.messageText=@"Put Android on this Mac's network?";
- a.informativeText=@"Android then joins your Wi-Fi as one more device, so your phone can find it. Googlebook VM installs a small network service for this, once; macOS will ask for your password.";
+ NSString *script=[NSBundle.mainBundle pathForResource:@"lan-setup" ofType:@"sh"];
+ int installed=bridgeVersion(@"/Library/Application Support/Googlebook VM/lan-bridge.sh");
+ BOOL present=[[NSFileManager defaultManager] fileExistsAtPath:kBridgeSocket];
+ if(present&&installed>=bridgeVersion(script))return YES;
+ NSAlert *a=[NSAlert new];
+ a.messageText=present?@"Update the network service?":@"Put Android on this Mac's network?";
+ a.informativeText=present?@"This version keeps Android on your network when the Mac's Wi-Fi reconnects or changes. macOS will ask for your password.":
+                           @"Android then joins your Wi-Fi as one more device, so your phone can find it. Googlebook VM installs a small network service for this, once; macOS will ask for your password.";
  [a addButtonWithTitle:@"Install"];[a addButtonWithTitle:@"Cancel"];
  if([a runModal]!=NSAlertFirstButtonReturn)return NO;
- NSString *script=[NSBundle.mainBundle pathForResource:@"lan-setup" ofType:@"sh"];
- NSString *src=[NSString stringWithFormat:@"do shell script quoted form of \"%@\" with administrator privileges",script];
+ NSString *src=[NSString stringWithFormat:@"do shell script \"/bin/bash \" & quoted form of \"%@\" with administrator privileges",script];
  NSDictionary *err=nil;NSAppleEventDescriptor *r=[[[NSAppleScript alloc] initWithSource:src] executeAndReturnError:&err];
  if(r&&[[NSFileManager defaultManager] fileExistsAtPath:kBridgeSocket])return YES;
- if([err[NSAppleScriptErrorNumber] intValue]==-128)return NO;   // cancelled at the password prompt
+ if([err[NSAppleScriptErrorNumber] intValue]==-128)return present;   // cancelled: an old service still works
  NSAlert *f=[NSAlert new];f.messageText=@"Couldn't set up the network service";
  f.informativeText=err[NSAppleScriptErrorMessage]?:@"See /var/log/googlebook-lan.log.";[f runModal];
  return NO;
@@ -633,7 +649,9 @@ static NSString *const kBridgeSocket=@"/opt/homebrew/var/run/googlebook-lan.sock
  const char *pe=getenv("VM_INPUT_PORT");int port=pe?atoi(pe):27183;if(port<=0)return NO;
  int ls=socket(AF_INET,SOCK_STREAM,0),one=1;setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
  struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=addr};
- if(bind(ls,(struct sockaddr *)&a,sizeof a)||listen(ls,1)){fprintf(stderr,"CONTROL listen failed on %d\n",port);close(ls);self.window.subtitle=[NSString stringWithFormat:@"Pointer link unavailable: port %d is in use by another program",port];return NO;}
+ if(bind(ls,(struct sockaddr *)&a,sizeof a)||listen(ls,1)){fprintf(stderr,"CONTROL listen failed on %d\n",port);close(ls);
+  if(onlyVM)return NO;   // the Mac's network address may not be up yet: tried again shortly
+  self.window.subtitle=[NSString stringWithFormat:@"Pointer link unavailable: port %d is in use by another program",port];return NO;}
  dispatch_source_t acceptSource=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,ls,0,dispatch_get_main_queue());
  [self.acceptSources addObject:acceptSource];
  dispatch_source_set_event_handler(acceptSource,^{

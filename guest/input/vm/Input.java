@@ -103,6 +103,7 @@ public final class Input {
             }
             waiting = false;
             try (Socket s = new Socket()) {
+                link = s;
                 s.connect(new InetSocketAddress(host, port), 2000);
                 s.setTcpNoDelay(true);
                 authed = false;
@@ -658,10 +659,21 @@ public final class Input {
         return text.toString("UTF-8");
     }
 
+    // The Mac's address on a shared network can change (Wi-Fi reconnects): the host then sends
+    // the token again with the new one. The old connection would wait forever, so drop it.
+    private static volatile Socket link;
+    private static void followHost() {
+        String was = host;
+        if (!loadToken() || host.equals(was)) { host = was; return; }
+        System.out.println("VM_INPUT the Mac moved to " + host);
+        try { Socket s = link; if (s != null) s.close(); } catch (Throwable t) { /* closed */ }
+    }
+
     private static void pollClipboard() {
         boolean reported = false;
         while (true) {
             SystemClock.sleep(700);
+            followHost();
             OutputStream o = out;
             if (o == null) continue;
             try {
