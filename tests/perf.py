@@ -2,7 +2,7 @@
 """Display smoothness benchmark: boot a --perf-test image with the viewer attached, let the guest
 scroll Settings (see image/guest_perf_test.sh), and report what each side saw.
 
-  perf.py WORK NAME --image DIR [--display WxH] [--refresh HZ] [--cpus N] [--gpu virgl|gfxstream]
+  perf.py WORK NAME --image DIR [--display WxH] [--refresh HZ] [--cpus N]
 
 Guest side: Android's own frame statistics per scroll round (frames, janky frames, frame-time
 percentiles, missed vsyncs). Host side: the frames the viewer received while the guest was
@@ -37,10 +37,9 @@ def main():
     display = sys.argv[sys.argv.index('--display') + 1] if '--display' in sys.argv else '1920x1200'
     refresh = ['--refresh', sys.argv[sys.argv.index('--refresh') + 1]] if '--refresh' in sys.argv else []
     refresh += ['--cpus', sys.argv[sys.argv.index('--cpus') + 1]] if '--cpus' in sys.argv else []
-    refresh += ['--gpu', sys.argv[sys.argv.index('--gpu') + 1]] if '--gpu' in sys.argv else []
     run = work / 'logs' / name
     vm = subprocess.Popen([sys.executable, str(HERE / 'run/run_vm.py'), str(work), name, '--seconds', '900', '--image', image,
-                           '--snapshot', '--no-audio', '--no-bluetooth', '--display', display] + refresh,
+                           '--snapshot', '--no-audio', '--display', display] + refresh,
                           stdout=subprocess.DEVNULL, start_new_session=True)
     deadline = time.monotonic() + 30
     while not (run / 'spice.sock').exists():

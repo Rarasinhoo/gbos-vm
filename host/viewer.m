@@ -273,7 +273,11 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  // Android 16 with Google's services swaps hard in 4 GB (laggy screens, CPU spent compressing
  // memory); give it 8 GB on Macs that have the room.
  NSNumber *memory=NSProcessInfo.processInfo.physicalMemory>=24ULL<<30?@8192:@4096;
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Networking":@YES,@"IsolateNetwork":@NO,@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES,@"Bluetooth":@YES,@"AndroidTouchpad":@NO,@"RefreshCap":@120}];
+ {NSUserDefaults *u=[NSUserDefaults standardUserDefaults];  // the network checkboxes became one choice
+  if(![u objectForKey:@"Network"]&&([u objectForKey:@"Networking"]||[u objectForKey:@"IsolateNetwork"]))
+   [u setObject:([u objectForKey:@"Networking"]&&![u boolForKey:@"Networking"])?@"off":[u boolForKey:@"IsolateNetwork"]?@"isolated":@"full" forKey:@"Network"];
+  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"Bluetooth",@"RefreshCap",@"Graphics"])[u removeObjectForKey:k];}
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES,@"AndroidTouchpad":@NO}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
@@ -375,10 +379,10 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  NSDateFormatter *f=[NSDateFormatter new];f.locale=[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];f.dateFormat=@"yyyyMMdd-HHmmss";NSString *name=[@"desktop-" stringByAppendingString:[f stringFromDate:[NSDate date]]];
  self.runDir=[[work stringByAppendingPathComponent:@"logs"] stringByAppendingPathComponent:name];
  NSMutableArray *args=[@[runner,work,name,@"--display",res,@"--memory",[[d objectForKey:@"MemoryMiB"] description],@"--cpus",[[d objectForKey:@"CPUs"] description]] mutableCopy];
- if(![d boolForKey:@"Networking"])[args addObject:@"--offline"];
- else if([d boolForKey:@"IsolateNetwork"])[args addObject:@"--isolated"];
+ NSString *network=[d stringForKey:@"Network"];
+ if([network isEqualToString:@"off"])[args addObject:@"--offline"];
+ else if([network isEqualToString:@"isolated"])[args addObject:@"--isolated"];
  if(![d boolForKey:@"Audio"])[args addObject:@"--no-audio"];
- if(![d boolForKey:@"Bluetooth"])[args addObject:@"--no-bluetooth"];
  if([d boolForKey:@"Camera"]){
   // The guest gets a USB webcam backed by this Mac's camera (host/webcam.m). It connects to the
   // VM's usb-redir socket as soon as QEMU creates it; the camera only runs while Android streams.
@@ -392,7 +396,6 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   self.microphone=[[GBMicrophone alloc] initWithSocketPath:[self.runDir stringByAppendingPathComponent:@"mic.sock"]];[self.microphone start];
  }
  // Pace the guest to the screen the window opens on (see guest_refresh in run_vm.py).
- [args addObjectsFromArray:@[@"--refresh-cap",[[d objectForKey:@"RefreshCap"] description]]];
  [args addObjectsFromArray:@[@"--host-refresh",[NSString stringWithFormat:@"%g",screenRefresh(self.window.screen?:NSScreen.mainScreen)]]];
  NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];[args insertObject:@"-I" atIndex:0];t.arguments=args;
  t.standardOutput=[NSFileHandle fileHandleWithNullDevice];t.standardError=[NSFileHandle fileHandleWithNullDevice];
@@ -522,20 +525,17 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
    @[label(@"Clipboard:"),[self checkbox:@"GuestClipboardToMac" title:@"Copy text copied in Android to the Mac clipboard"]],
    @[[NSGridCell emptyContentView],note],
    @[[NSGridCell emptyContentView],[NSButton buttonWithTitle:@"Restart VM Now" target:self action:@selector(restartVM:)]],
-   @[label(@"Refresh rate:"),[self popup:@"RefreshCap" titles:@[@"Screen's full rate, up to 120 Hz",@"Lighter, up to 75 Hz (60 on a 120 Hz screen)"] values:@[@120,@75]]],
    @[label(@"Resolution:"),[self popup:@"Resolution" titles:@[@"Match this Mac's display",@"1920 × 1080 (16:9)",@"2560 × 1440 (16:9)",@"3840 × 2160 (16:9, 4K)",@"3440 × 1440 (21:9 ultrawide)",@"1920 × 1200 (16:10)",@"2560 × 1600 (16:10)",@"3024 × 1890 (16:10)",@"3456 × 2160 (16:10)"] values:@[@"native",@"1920x1080",@"2560x1440",@"3840x2160",@"3440x1440",@"1920x1200",@"2560x1600",@"3024x1890",@"3456x2160"]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"StartFullscreen" title:@"Start in full screen"]],
    @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],
    @[label(@"Processor cores:"),[self popup:@"CPUs" titles:@[@"4",@"6",@"8"] values:@[@4,@6,@8]]],
-   @[label(@"Graphics:"),[self popup:@"Graphics" titles:@[@"virgl (standard)",@"gfxstream (experimental, faster)"] values:@[@"virgl",@"gfxstream"]]],
-   @[[NSGridCell emptyContentView],[self hint:@"Graphics changes the system part: run ./update-image.sh afterwards (your data stays)."]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Networking" title:@"Networking (also needed for the pointer and clipboard link)"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"IsolateNetwork" title:@"Isolate from this Mac: no internet or Mac services, pointer link only"]],
+   @[label(@"Network:"),[self popup:@"Network" titles:@[@"Internet",@"Isolated from this Mac (no internet or Mac services)",@"Off (also no pointer or clipboard link)"] values:@[@"full",@"isolated",@"off"]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Audio" title:@"Audio output"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Bluetooth" title:@"Bluetooth (virtual radio; needs the Android emulator installed)"]]]];
+   @[[NSGridCell emptyContentView],[self checkbox:@"Camera" title:@"Camera (Android sees this Mac's camera as a USB webcam)"]],
+   @[[NSGridCell emptyContentView],[self checkbox:@"Microphone" title:@"Microphone (Android hears this Mac's microphone as a USB mic)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
-  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,530) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,470) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
   w.title=@"Googlebook Settings";w.releasedWhenClosed=NO;[w.contentView addSubview:grid];
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;

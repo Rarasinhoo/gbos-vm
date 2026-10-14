@@ -2,14 +2,14 @@
 
 Runs a real Googlebook OS image in a VM on an Apple Silicon Mac — GPU-accelerated, with Chrome working.
 
-It's not an emulator image or a generic Android build. The install script downloads Google's own recovery image for the Dell Googlebook (ARM64, Android 17), swaps the hardware-specific bits for virtual ones, and boots it under QEMU with Vulkan passed through to Metal.
+It's not an emulator image or a generic Android build. The install script downloads Google's own recovery image for the Dell Googlebook (ARM64, Android 17), swaps the hardware-specific bits for virtual ones, and boots it under QEMU with [gfxstream](https://android.googlesource.com/platform/hardware/google/gfxstream): Android's Vulkan and OpenGL ES run on the Mac's GPU, through MoltenVK and Metal, and frames reach the window without a trip through the CPU.
 
 > This isn't affiliated with Google or Dell, and it's not a verified Googlebook. Read [System Structure](#system-structure) before you sign into anything.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/skylartaylor/gbos-vm.git
+git clone https://github.com/Rarasinhoo/gbos-vm.git
 cd gbos-vm
 ./install.sh
 ```
@@ -22,7 +22,7 @@ open "work/host/Googlebook VM.app"
 
 Drag that into your Dock if you want it there. It boots the VM when you open it and shuts Android down properly when you quit.
 
-The first boot takes about 45 seconds on a M5 MacBook. If you land on a user picker, click **User** — there's no password.
+The first boot takes about 45 seconds on a M5 MacBook, and it goes straight into the one user account (no password).
 
 `install.sh` downloads about 9 GB and wants 60 GB free. On an M5 MacBook the build part takes around five minutes; the downloads take however long your connection takes.
 
@@ -32,9 +32,9 @@ The first boot takes about 45 seconds on a M5 MacBook. If you land on a user pic
 - **16 GB of RAM**, realistically. The VM gets 4 GB (8 GB on Macs with 24 GB or more: in 4 GB Android 16 swaps a lot, which makes some screens lag) and the builds want a few more.
 - **Xcode command line tools** and **[Homebrew](https://brew.sh)**.
 - The **Android SDK** with an NDK, a build-tools version, and a platform (API 34+). Android Studio's defaults are fine. We build with NDK `28.2.13676358`; if you don't have that one the script uses your newest (30 is reported to work), or set `ANDROID_NDK` to pick.
+- **Rust, CMake and Bazel** for the graphics stack (gfxstream's renderer and its QEMU device). `install.sh` installs them through Homebrew.
 - A **JDK**. If you have Android Studio, its bundled one gets picked up automatically.
 - **Python 3.10 or newer** for the build tools (meson). The `python3` that comes with Xcode's command line tools is 3.9, so this usually means `brew install python@3.13`. To use a specific interpreter, set `GBOS_PYTHON`.
-- Optionally, the **Android Emulator** package from the SDK. Bluetooth borrows its virtual radio (see [What doesn't work yet](#what-doesnt-work-yet)); without it the VM boots with no Bluetooth.
 
 `install.sh` checks all of this before it downloads anything, and offers to install what's missing — the Homebrew packages, a JDK, and the Android pieces through Google's `sdkmanager` (you don't need Android Studio). It never asks for `sudo`. Run `./prereqs.sh` on its own to see where you stand.
 
@@ -53,13 +53,13 @@ We build and test on one machine (M5, 16 GB, macOS 27). A couple of people have 
 
 Android shows your Mac's battery: its level, and whether it is charging (a VM has no battery of its own, so it used to read empty). Quitting (or closing the window) shuts Android down properly. Your data lives in `work/image/googlebook.raw` and sticks around between runs.
 
-**Settings** (`⌘,`) has the pointer mode, clipboard, resolution, memory, CPU cores, and toggles for networking, audio, Bluetooth, the camera and the microphone. Pointer mode and clipboard change right away; everything else is a VM option, so it applies the next time you start it.
+**Settings** (`⌘,`) has the pointer mode and touchpad, clipboard, resolution, memory, CPU cores, network, and toggles for audio, the camera and the microphone. Pointer mode and clipboard change right away; everything else is a VM option, so it applies the next time you start it. The refresh rate isn't a setting: it follows the screen the window opens on (Android's own refresh setting has nothing to switch between, since the virtual display offers it one rate).
 
 Resolution defaults to your display's native pixels at 16:10, and Android's UI is sized the way macOS sizes its own (density 320 at native resolution on a Retina screen, macOS's 2x). On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel. Settings also offers 1080p, 1440p, 4K and 3440 × 1440 ultrawide.
 
 **Clipboard.** `⌘V` pastes the Mac clipboard into the guest, and that is the only time it is sent. Copying from Android to the Mac is off by default; enable it in Settings if you trust what you run in the guest.
 
-**Isolate from this Mac** (Settings, experimental) blocks the internet and your Mac's local services from the guest, keeping only the pointer and clipboard link. Normal networking lets the guest reach your Mac's `127.0.0.1` through `10.0.2.2`.
+**Network** (Settings) is *Internet* by default. *Isolated from this Mac* (experimental) blocks the internet and your Mac's local services from the guest, keeping only the pointer and clipboard link; normal networking lets the guest reach your Mac's `127.0.0.1` through `10.0.2.2`. *Off* removes networking, and with it the pointer and clipboard link.
 
 ### Updating
 
@@ -67,6 +67,7 @@ After a `git pull`, rebuild the app and refresh the system part of your disk. Qu
 
 ```bash
 ./build-host.sh
+./build-gfxstream.sh
 ./update-image.sh
 ```
 
@@ -91,9 +92,7 @@ Android sees your Mac's camera as a plugged-in USB webcam ("Mac Camera"), offere
 
 Your Mac's microphone shows up the same way, as a USB microphone ("Mac Microphone", 48 kHz mono). Recording video and calls need it: without one, Android's recorder waits for sound that never comes. macOS asks for microphone access the first time an app records, and the Mac microphone (and its orange dot) only runs while something in Android is recording. Turned off in Settings, Android has no microphone at all, so nothing that records sound (video included) will work.
 
-The built-in Camera app shows a live preview and records video with sound, and the recordings play back. Apps that draw camera or video frames themselves with OpenGL ES may still show black — see [What doesn't work yet](#what-doesnt-work-yet).
-
-The camera needs all three builds from this change: `build-host.sh` (the renderer and the viewer), `build-guest.sh` (the guest Vulkan driver) and `build-image.sh` (which passes `--camera` and sets up USB audio input). An older image just won't list a camera or record from the microphone. `python3 run/vm_control.py work/logs/<run> VM_CAMERA_DIAG` prints what the guest sees.
+The built-in Camera app shows a live preview and records video with sound, and the recordings play back.
 
 ## System Structure
 
@@ -104,7 +103,7 @@ The image starts as Google's unmodified recovery download. We don't touch the sy
 - **Three extra SELinux rules**, all narrowly about graphics buffer sharing. SELinux stays enforcing. They apply to `platform_app`, `priv_app` and `priv_app_36`, for the graphics allocator's shared memory only.
 - **No lock screen, unlocked boot state.** Setup is skipped and the screen stays on. Keys are software only and sit on the same disk as your data, so keep `work/image/googlebook.raw` private (the build makes it readable only by you).
 - **A guest log.** `work/logs/<run>/serial.log` holds guest console output, including crash excerpts and package names. Nothing prunes old runs.
-- **Cuttlefish's Bluetooth service** instead of the Qualcomm one, talking to a virtual radio on your Mac over a virtual serial port. The radio listens on `127.0.0.1` with no password, so another program on your Mac could join it and show up as a nearby Bluetooth device. Turn Bluetooth off in Settings if that bothers you.
+- **Cuttlefish's Bluetooth service** instead of the Qualcomm one, so the missing Qualcomm radio doesn't crash on boot. With no radio attached, Android is told it has no Bluetooth.
 - **A helper running as the Android shell user** that takes pointer and clipboard input from the viewer. It listens to nothing and connects out to `127.0.0.1` on your Mac. Both ends prove a random token to each other before anything else is sent. The token reaches Android over the serial console, into a file only the shell user can read.
 - **AOSP's V4L2 camera provider** (Cuttlefish's build) instead of Googlebook's USB camera HAL, plus one service label for it in `vendor_service_contexts`. The SELinux policy itself is unchanged. The device also declares an external camera instead of a front one, because that's what the provider reports.
 - **Cuttlefish's audio configuration, edited for a USB microphone:** an input-only USB audio module is added, and the built-in microphone the VM doesn't have is removed.
@@ -113,45 +112,45 @@ So: treat it like a dev VM. It's great for poking at the OS. I wouldn’t daily 
 
 ## What doesn't work yet
 
-- **Bluetooth is virtual only.** If you have the Android Emulator installed, the VM gets its simulated radio (`netsimd`): Bluetooth turns on, but there's nothing real to pair with. Actual devices would need a USB dongle bridged in, which we haven't built. Without the emulator, Android is told it has no Bluetooth at all.
-- **The refresh rate follows the screen the window opens on**, up to 120 Hz, as a whole fraction of it where needed so every frame stays up the same number of refreshes (144 Hz gets 72). QEMU hard-codes 75 Hz in the display description it gives the guest, so the runner patches that one constant in a copy of QEMU's library (`work/host/qemu-aarch64-softmmu-<rate>mhz`); if a future UTM build changes that code, it falls back to 60 or 75 Hz. At native resolution and 120 Hz, 2-4% of frames miss their deadline while scrolling; Settings has a lighter option (up to 75 Hz: 60 on a 120 Hz screen, about 0.5%). Move the window to another screen and it keeps the old rate until the next restart.
+- **No Bluetooth yet.** Android is told it has none. Your Mac's own radio isn't passed through; that's the plan. (`run_vm.py --bluetooth` attaches the Android Emulator's simulated radio, for development: nothing real can pair with it.)
+- **The refresh rate follows the screen the window opens on**, up to 120 Hz, as a whole fraction of it where needed so every frame stays up the same number of refreshes (144 Hz gets 72). QEMU hard-codes 75 Hz in the display description it gives the guest, so the runner patches that one constant in a copy of QEMU's library (`work/host/qemu-gfx-aarch64-softmmu-<rate>mhz`); if a future QEMU changes that code, it falls back to 60 or 75 Hz. Move the window to another screen and it keeps the old rate until the next restart.
 - **Frames are shown on the guest's clock**, not as they arrive: the viewer rebuilds the guest's frame timing and shows every frame the same few milliseconds after it was due (about 7 ms at 120 Hz), so jitter in the copy from the guest doesn't make frames stay up a refresh too long or too short. The viewer never asks for a new drawable while a frame is still waiting to be shown (it draws the newest frame once that one is up), so it never waits on the display, and neither does the mouse, which the same thread delivers. `VM_NO_PACING=1` turns this off. `tests/perf.py` measures it.
-- **Camera and video frames in OpenGL ES apps.** Android itself draws camera previews and video with Vulkan here, and that works. An app that samples those frames with OpenGL ES instead (through a `SurfaceTexture`) gets a black or broken image: the guest's OpenGL ES driver can't read YUV buffers yet.
 - **Flat shading can be wrong.** Chrome needs a Vulkan extension MoltenVK doesn't have, so we tell the guest it exists. That's fine for almost everything; `flat`-interpolated WebGL content may pick the wrong vertex.
 - **Copying *out* of the guest, right-click, and long sessions** are implemented but haven't had a proper test. They might be fine. They might not.
 - **Audio was silent on one boot** and then worked. We don't know why yet.
 
 ## The Custom Bits
 
-Six things had to be built for this:
+The graphics took the most building:
 
-**Buffer sharing between GLES and Vulkan.** Android hands the same graphics buffer to both APIs. On Linux that's a dma-buf; macOS has no such thing. We back each shared buffer with POSIX shared memory and import it into both Metal and MoltenVK — patch in `patches/virglrenderer-android-interop.patch`.
+**A guest driver that matches the Mac's renderer.** gfxstream's Mac support lives in a fork of Google's renderer, cut from one revision of Android's Mesa; the guest's Vulkan driver has to speak exactly that revision's protocol, or Android's compositor crashes on its first frame. So `build-gfxstream.sh` builds the guest driver from that same Mesa revision, outside the Android source tree, with small stand-ins for the few Android headers it wants (`guest/gfxstream-shims`, `patches/mesa-gfxstream-guest.patch`).
 
-**Row pitch.** Metal wants texture rows padded to 16 bytes; Android doesn't. The fix turned out to be small: that memory only ever lives on the Mac side, so the host can use whatever pitch Metal wants and the guest never needs to know.
+**Frames without a copy.** gfxstream draws into Metal textures, and QEMU's SPICE display already knows how to blit a Metal texture into the IOSurface the viewer shows. The renderer now hands QEMU the texture behind each scanout, and a small compute shader converts its RGBA to the viewer's BGRA on the GPU (`patches/gfxstream-host.patch`, `patches/qemu-gfxstream.patch`). That roughly doubled the frame rate over reading every frame back.
+
+**Android's assumptions about a GPU.** Android's UI renderer insists on two graphics queues (MoltenVK has one; gfxstream offers a virtual second). The Linux kernel hands a graphics context id to the next process the moment the last one lets go, while the renderer was still cleaning up after the old owner under that id, destroying the new process's objects; the renderer now finishes first. And ANGLE offers OpenGL ES 3, which Chrome needs, only with `VK_EXT_provoking_vertex`, which UTM's MoltenVK leaves out, so the guest driver offers it itself.
+
+**Video in the right colours.** Android's software decoders hand the compositor YV12 frames (a brightness plane, then two quarter-size colour planes). Those buffers are marked for CPU access, so the renderer made them linear, while the guest reads them through optimally tiled images bound to the same memory; on MoltenVK the two don't lay planes out alike. Three-plane images don't alias between the two sides either. YUV buffers are now always optimal and kept in the NV12 shape (brightness, then interleaved colour) on both sides, converted on the way in and out.
 
 **A pointer that isn't a mouse.** Android wouldn't accept QEMU's absolute tablet, and steering a relative mouse to match your real cursor drifts. So a tiny helper inside the guest creates a virtual drawing tablet — which Android treats as an absolute pointer — and the viewer feeds it coordinates. This doesn’t work as well as we’d like, so capturing the cursor is most reliable still. We’re hoping to improve it.
 
 **A webcam that is really a process.** QEMU on macOS has no virtual camera, and the Mac's camera isn't a USB device it could pass through. But QEMU's `usb-redir` lets something outside the VM *be* a USB device, so the viewer speaks that protocol over a socket and presents a standard UVC webcam (MJPEG over a bulk endpoint) fed by AVFoundation — `host/webcam.m`. The guest kernel already has `uvcvideo`. Googlebook OS ships its own USB camera HAL, but it runs every session through GPU effects (OpenGL, OpenCL, Vulkan with external memory) the VM can't provide, so the image retires it and adds AOSP's plain V4L2 camera provider from Cuttlefish instead — `image/mica_camera_port.py`. The microphone is the same trick (`host/microphone.m`): QEMU's own audio devices and its coreaudio backend can only play sound, so the viewer presents a USB Audio Class microphone and streams one isochronous packet per millisecond from AVAudioEngine. Android then needed two changes before it would record from it. Cuttlefish's audio setup has no USB module at all, so the image adds one for input only (the speaker stays on the module that already plays it). And it declares a built-in microphone, which Android picks over a USB one when recording video; the VM has none, so the image removes it — `image/mica_audio_port.py`.
 
-**Camera frames on a GPU path with no YUV.** Camera frames are YUV: a full-size brightness plane plus a half-size colour plane. On Linux hosts those go through gbm; macOS has nothing like it. Android's allocator already has a fallback for that case — keep both planes in one plain 8-bit texture — but the renderer claimed the Mac could put YUV on screen, which switched the fallback off, so no camera buffer could be allocated at all. Now the renderer stops claiming that, stores the YUV buffers it is asked for directly in the same packed layout, and shares them through the same shared memory as above. The guest's Vulkan driver reads both planes from the buffer's metadata and imports it as a two-plane image, and MoltenVK converts it to RGB as it samples — `patches/virglrenderer-android-interop.patch` and `patches/mesa-android-mapper5.patch`.
-
-**Video frames, with three planes.** Android's software video decoders hand the screen YV12 frames: brightness plus two quarter-size colour planes, V before U. The allocator's fallback for those pads every colour row to the full brightness width, which no Vulkan image can describe, and when the compositor can't import a frame it aborts and takes the whole UI down with it. So the renderer now accepts real YV12 buffers too, stored the same packed way, which keeps the colour rows at half width. MoltenVK lays an image's planes out in order, so the guest's Vulkan driver binds them in memory order and swaps the two colour channels back as it converts. Where the guest pads rows more than the Mac would (to 32 bytes rather than 16), the Mac-side image is made that much wider, so every plane still lines up.
-
-The rest is plumbing: `fetch.sh` gets the images, `build-host.sh` builds the patched renderer and viewer, `build-guest.sh` cross-compiles Mesa for Android, and `build-image.sh` assembles the disk.
+The rest is plumbing: `fetch.sh` gets the images, `build-host.sh` builds the launcher and the viewer, `build-guest.sh` builds the guest helpers, `build-gfxstream.sh` builds the renderer, QEMU and the guest's graphics driver, and `build-image.sh` assembles the disk.
 
 ## Layout
 
 ```
-install.sh          runs the four steps below in order
+install.sh          runs the five steps below in order
 fetch.sh            downloads + verifies the Googlebook image, Cuttlefish, and UTM
-build-host.sh       patched virglrenderer, QEMU launcher, viewer
-build-guest.sh      Mesa (GLES + Vulkan), pointer helper, SELinux policy tool
+build-host.sh       QEMU launcher, viewer app
+build-guest.sh      pointer helper, Vulkan self-test, SELinux policy tool
+build-gfxstream.sh  gfxstream renderer, QEMU with its device, the guest's Vulkan driver
 build-image.sh      assembles the bootable disk
 update-image.sh     refreshes an existing disk after a git pull, keeping your data
 run/                VM runner and a command-line launcher (the app bundles these)
 image/              the scripts that rebuild the vendor partition
 guest/  host/       sources for the bits we wrote
-patches/            our changes to virglrenderer, Mesa and CocoaSpice
+patches/            our changes to gfxstream, QEMU, Mesa and CocoaSpice
 tests/              soak and display smoothness runs on throwaway test images
 ```
 
@@ -163,12 +162,13 @@ Nothing from Google or UTM is redistributed here. The script fetches each of the
 
 - Googlebook recovery image — `dl.google.com` (build `16471258`)
 - Cuttlefish virtual device image — `ci.android.com` (build `16373615`)
-- UTM 5.0.6 beta — the official GitHub release (for its QEMU, MoltenVK and ANGLE)
-- Mesa 26.2.4, libsepol 3.11, bison 3.8.2 — their upstream release tarballs
+- UTM 5.0.6 beta — the official GitHub release (for MoltenVK, ANGLE and QEMU's firmware)
+- UTM's QEMU 10.0.12 source, gfxstream (the macOS fork from google/gfxstream#168), rutabaga_gfx, Android's Mesa, and one minigbm header — each at a pinned commit or checksum
+- Mesa 26.2.4 (for its kernel interface headers) and libsepol 3.11 — their upstream release tarballs
 
 ## Credits
 
-This leans entirely on other people's work: [UTM](https://github.com/utmapp/UTM) and its forks of virglrenderer and CocoaSpice, [Mesa](https://mesa3d.org), [MoltenVK](https://github.com/KhronosGroup/MoltenVK), QEMU, and the Android Cuttlefish team, whose virtual-device components are what make the image boot at all. The pointer helper uses the same trick as [scrcpy](https://github.com/Genymobile/scrcpy).
+This leans entirely on other people's work: [UTM](https://github.com/utmapp/UTM) and its forks of QEMU and CocoaSpice, Google's [gfxstream](https://android.googlesource.com/platform/hardware/google/gfxstream) and [rutabaga_gfx](https://github.com/magma-gpu/rutabaga_gfx), [Mesa](https://mesa3d.org), [MoltenVK](https://github.com/KhronosGroup/MoltenVK), QEMU, and the Android Cuttlefish team, whose virtual-device components are what make the image boot at all. The pointer helper uses the same trick as [scrcpy](https://github.com/Genymobile/scrcpy).
 
 ## License
 

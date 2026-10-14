@@ -8,7 +8,9 @@
 # line tools and Homebrew itself need you: it prints the command.
 . "$(dirname "$0")/lib.sh"
 MODE="${1:-ask}"
-BREW_FORMULAE="erofs-utils e2fsprogs lz4 pkgconf"
+# The last line is the gfxstream graphics build (renderer in Rust and Bazel, QEMU's own devices)
+BREW_FORMULAE="erofs-utils e2fsprogs lz4 pkgconf
+  rust cmake bazelisk libslirp spice-protocol spice-server libusb usbredir"
 SDK_BUILD_TOOLS="build-tools;36.0.0"; SDK_PLATFORM="platforms;android-36"
 
 missing=(); manual=()

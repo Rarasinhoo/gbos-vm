@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the pieces that go inside the guest image, plus the host-side SELinux policy tool:
-#   Mesa VirGL GLES libraries, Mesa Venus Vulkan driver (with the Android mapper patch),
-#   the pointer/clipboard helper, a Vulkan self-test, and guest_graphics_memfd_policy.
+#   the pointer/clipboard helper, a Vulkan self-test, and guest_graphics_memfd_policy, and the
+#   Android cross-compiling set-up build-gfxstream.sh builds the guest's graphics driver with.
 # Needs the Android NDK, SDK build-tools and platform, and a JDK. Output: $WORK/guest, $WORK/tools.
 . "$(dirname "$0")/lib.sh"
 find_android
@@ -11,24 +11,9 @@ find_android
 NDK_BIN="$ANDROID_NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
 [ -x "$WORK/env/bin/meson" ] || die "run build-host.sh first (it creates the meson environment)"
 export PATH="$WORK/env/bin:$PATH" CCACHE_DISABLE=1
-mkdir -p "$WORK/src" "$WORK/build" "$WORK/guest/mesa-runtime" "$WORK/tools" "$WORK/android-pkgconfig"
+mkdir -p "$WORK/src" "$WORK/build" "$WORK/guest" "$WORK/tools" "$WORK/android-pkgconfig"
 
-say "bison 3 (macOS ships 2.3, which cannot process Mesa's grammars)"
-BREW_BISON="$(brew --prefix bison 2>/dev/null || true)/bin"
-if [ -x "$BREW_BISON/bison" ]; then BISON_DIR="$BREW_BISON"
-else
-  BISON_DIR="$WORK/tools/bison/bin"
-  if [ ! -x "$BISON_DIR/bison" ]; then
-    fetch "$BISON_URL" "$WORK/downloads/bison-3.8.2.tar.xz" "$BISON_SHA256"
-    tar -xf "$WORK/downloads/bison-3.8.2.tar.xz" -C "$WORK/src"
-    (cd "$WORK/src/bison-3.8.2" && ./configure --prefix="$WORK/tools/bison" --disable-nls >"$WORK/build/bison.log" 2>&1 \
-      && make -j "$JOBS" >>"$WORK/build/bison.log" 2>&1 && make install >>"$WORK/build/bison.log" 2>&1) || { tail -20 "$WORK/build/bison.log"; die "bison build failed"; }
-  fi
-fi
-export PATH="$BISON_DIR:$PATH"
-bison --version | head -1
-
-say "Mesa source"
+say "Mesa source (kernel interface headers)"
 fetch "$MESA_URL" "$WORK/downloads/mesa-26.2.4.tar.xz" "$MESA_SHA256"
 [ -d "$MESA_SRC" ] || tar -xf "$WORK/downloads/mesa-26.2.4.tar.xz" -C "$(dirname "$MESA_SRC")"
 
@@ -52,39 +37,6 @@ endian = 'little'
 needs_exe_wrapper = true
 pkg_config_libdir = '$WORK/android-pkgconfig'
 CROSS
-COMMON=(--cross-file "$WORK/android-aarch64.cross" --buildtype=release -Dforce_fallback_for=libdrm,expat
-  -Dallow-fallback-for=libdrm -Dplatforms=android -Dplatform-sdk-version=35 -Dandroid-stub=true
-  -Dandroid-libbacktrace=disabled -Dllvm=disabled -Dglx=disabled -Dgbm=disabled -Dvideo-codecs=
-  -Dgallium-va=disabled -Dzstd=disabled)
-
-say "Mesa VirGL GLES libraries (unpatched source)"
-[ -f "$WORK/build/mesa-gles/build.ninja" ] || meson setup "$WORK/build/mesa-gles" "$MESA_SRC" "${COMMON[@]}" \
-  -Dgallium-drivers=virgl -Dvulkan-drivers= -Degl=enabled -Dgles1=enabled -Dgles2=enabled -Dopengl=true \
-  -Degl-lib-suffix=_virgl -Dgles-lib-suffix=_virgl >"$WORK/build/mesa-gles.configure.log" 2>&1
-ninja -j "$JOBS" -C "$WORK/build/mesa-gles" >"$WORK/build/mesa-gles.build.log" 2>&1 || { tail -20 "$WORK/build/mesa-gles.build.log"; die "Mesa GLES build failed"; }
-for pair in src/egl/libEGL_virgl.so src/mesa/glapi/es1api/libGLESv1_CM_virgl.so src/mesa/glapi/es2api/libGLESv2_virgl.so \
-            src/gallium/targets/dri/libgallium_dri.so subprojects/libdrm-2.4.133/libdrm.so; do
-  "$NDK_BIN/llvm-strip" --strip-unneeded -o "$WORK/guest/mesa-runtime/$(basename "$pair")" "$WORK/build/mesa-gles/$pair"
-done
-
-say "Mesa Venus Vulkan driver (with the Android mapper patch)"
-# A separate copy of the tree, so the GLES build above stays on unpatched source as tested.
-VENUS_SRC="$WORK/src/mesa-26.2.4-venus"
-PATCH_ID="$(shasum -a 256 "$ROOT/patches/mesa-android-mapper5.patch" | cut -d' ' -f1)"
-if [ "$(cat "$VENUS_SRC/.gbos-patch" 2>/dev/null)" != "$PATCH_ID" ]; then
-  # First run, or the patch changed: start again from the unpatched tree.
-  rm -rf "$VENUS_SRC" "$WORK/build/mesa-venus"
-  cp -c -R "$MESA_SRC" "$VENUS_SRC" 2>/dev/null || cp -R "$MESA_SRC" "$VENUS_SRC"
-  patch -s -p1 -d "$VENUS_SRC" < "$ROOT/patches/mesa-android-mapper5.patch"
-  echo "$PATCH_ID" > "$VENUS_SRC/.gbos-patch"
-fi
-[ -f "$WORK/build/mesa-venus/build.ninja" ] || meson setup "$WORK/build/mesa-venus" "$VENUS_SRC" "${COMMON[@]}" \
-  --wrap-mode=nodownload -Dgallium-drivers= -Dvulkan-drivers=virtio -Degl=disabled -Dgles1=disabled \
-  -Dgles2=disabled -Dopengl=false >"$WORK/build/mesa-venus.configure.log" 2>&1
-ninja -j "$JOBS" -C "$WORK/build/mesa-venus" src/virtio/vulkan/libvulkan_virtio.so >"$WORK/build/mesa-venus.build.log" 2>&1 \
-  || { tail -20 "$WORK/build/mesa-venus.build.log"; die "Mesa Venus build failed"; }
-cp "$WORK/build/mesa-venus/src/virtio/vulkan/libvulkan_virtio.so" "$WORK/guest/libvulkan_virtio.so"
-
 say "Pointer and clipboard helper"
 rm -rf "$WORK/build/input"; mkdir -p "$WORK/build/input"
 "$JAVA_HOME/bin/javac" -source 11 -target 11 -Xlint:-options -cp "$ANDROID_JAR" -d "$WORK/build/input" "$ROOT/guest/input/vm/Input.java"
@@ -103,4 +55,4 @@ cc -O2 -I"$WORK/src/libsepol-3.11/include" "$ROOT/tools-src/guest_graphics_memfd
   "$WORK/src/libsepol-3.11/src/libsepol.a" -o "$WORK/tools/guest_graphics_memfd_policy"
 
 say "Guest build complete"
-ls -l "$WORK/guest" "$WORK/guest/mesa-runtime" "$WORK/tools"
+ls -l "$WORK/guest" "$WORK/tools"

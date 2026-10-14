@@ -12,6 +12,7 @@ ram_gb=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 "$ROOT/fetch.sh"
 "$ROOT/build-host.sh"
 "$ROOT/build-guest.sh"
+"$ROOT/build-gfxstream.sh"
 "$ROOT/build-image.sh"
 for f in "$WORK/host/Googlebook VM.app" "${GBOS_IMAGE_DIR:-$WORK/image}/googlebook.raw" "${GBOS_IMAGE_DIR:-$WORK/image}/initrd.img" "${GBOS_IMAGE_DIR:-$WORK/image}/kernel.Image"; do
   [ -e "$f" ] || die "the build finished without producing $f. Please report this with the output above."

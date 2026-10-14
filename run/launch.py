@@ -46,14 +46,14 @@ def main():
     # Android 16 with Google's services swaps hard in 4 GB; 8 GB on Macs that have the room
     big = int(subprocess.check_output(['/usr/sbin/sysctl', '-n', 'hw.memsize'], text=True)) >= 24 << 30
     options = ['--memory', setting('MemoryMiB', '8192' if big else '4096'), '--cpus', setting('CPUs', '6')]
-    if setting('Networking', '1') == '0': options.append('--offline')
-    elif setting('IsolateNetwork', '0') == '1': options.append('--isolated')
+    network = setting('Network', 'full')
+    if network == 'off': options.append('--offline')
+    elif network == 'isolated': options.append('--isolated')
     if setting('Audio', '1') == '0': options.append('--no-audio')
-    if setting('Bluetooth', '1') == '0': options.append('--no-bluetooth')
     density = 320  # macOS's own 2x, unless the viewer says otherwise for this screen
     try:  # pace the guest to the main screen (see guest_refresh in run_vm.py), and size its UI like macOS
         hz, d = subprocess.check_output([str(viewer_app), '--screen', str(width)], text=True, timeout=10).split()
-        density = int(d); options += ['--host-refresh', str(float(hz)), '--refresh-cap', setting('RefreshCap', '120')]
+        density = int(d); options += ['--host-refresh', str(float(hz))]
     except (subprocess.SubprocessError, OSError, ValueError):
         pass
     name = 'desktop-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S')

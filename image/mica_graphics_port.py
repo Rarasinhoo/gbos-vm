@@ -1,14 +1,17 @@
-"""Add the graphics stack to the vendor overlay: Mesa VirGL, the Cuttlefish minigbm allocator, and the generic DRM composer."""
+"""Add the graphics stack to the vendor overlay: the Cuttlefish minigbm allocator, the generic DRM
+composer and libdrm (with --gfxstream; without it, Mesa VirGL as well)."""
 from pathlib import Path
-import os,subprocess
+import os,subprocess,sys
 R=Path(__file__).resolve().parents[1]
 def apply(add,original):
  B=R/'experiments/mesa-android-build';O=R/'artifacts/graphics-port-review/mesa-runtime';O.mkdir(exist_ok=True)
  strip=os.path.join(os.environ.get('ANDROID_NDK',''),'toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-strip')  # only used without GOOGLEBOOK_GUEST_DIR
  mesa={'lib64/egl/libEGL_virgl.so':'src/egl/libEGL_virgl.so','lib64/egl/libGLESv1_CM_virgl.so':'src/mesa/glapi/es1api/libGLESv1_CM_virgl.so','lib64/egl/libGLESv2_virgl.so':'src/mesa/glapi/es2api/libGLESv2_virgl.so','lib64/libgallium_dri.so':'src/gallium/targets/dri/libgallium_dri.so','lib64/libdrm.so':'subprojects/libdrm-2.4.133/libdrm.so'}
+ if '--gfxstream' in sys.argv:  # GLES is Android's ANGLE; only libdrm is ours
+  mesa={'lib64/libdrm.so':'subprojects/libdrm-2.4.133/libdrm.so'}
  for n,p in mesa.items():
   # GOOGLEBOOK_GUEST_DIR: use already-stripped libraries from publish/build-guest.sh.
-  if os.environ.get('GOOGLEBOOK_GUEST_DIR'):add(n,(Path(os.environ['GOOGLEBOOK_GUEST_DIR'])/'mesa-runtime'/Path(n).name).read_bytes(),'same_process_hal_file');continue
+  if os.environ.get('GOOGLEBOOK_GUEST_DIR'):g=Path(os.environ['GOOGLEBOOK_GUEST_DIR']);add(n,((g/'libdrm.so') if '--gfxstream' in sys.argv else (g/'mesa-runtime'/Path(n).name)).read_bytes(),'same_process_hal_file');continue
   out=O/Path(n).name;subprocess.run([strip,'--strip-unneeded','-o',str(out),str(B/p)],check=True);add(n,out.read_bytes(),'same_process_hal_file')
  donor=R/'artifacts/graphics-port-review/extracted'
  for n in ['libminigbm_gralloc.so','libminigbm_gralloc4_utils.so','android.hardware.graphics.allocator-V3-ndk.so','android.hardware.graphics.common-V7-ndk.so']:

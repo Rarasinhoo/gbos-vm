@@ -8,8 +8,6 @@ WORK="${GOOGLEBOOK_WORK:-$ROOT/work}"
 UTM_BETA_APP="${UTM_BETA_APP:-$WORK/UTM-beta/UTM.app}"
 # Mesa source tree: supplies Khronos headers for the host build and is the guest driver source.
 MESA_SRC="${MESA_SRC:-$WORK/src/mesa-26.2.4}"
-VIRGL_REPO="https://github.com/utmapp/virglrenderer.git"
-VIRGL_COMMIT="5d26f605f50f8e22002ec6db5fb775e1992d4e96"
 EPOXY_REPO="https://github.com/utmapp/libepoxy.git"
 EPOXY_COMMIT="bf98587477fe68d07b93319ece7b40a7d0e2eabe"
 # Build Mac binaries that also run on older macOS, not only the version they were built on.
@@ -45,8 +43,6 @@ apply_patch() { # repo patch
 }
 MESA_URL="https://archive.mesa3d.org/mesa-26.2.4.tar.xz"
 MESA_SHA256="bce5f7fbebb934373b86c999a064d52fb5065878dc57f287f95346648ec832e9"
-BISON_URL="https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz"
-BISON_SHA256="9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2"
 LIBSEPOL_SHA256="79f3d2c88f44b7eb5cf54d9792e03232297e17f97a179163f2750099a00f164d"
 LIBSEPOL_URL="https://github.com/SELinuxProject/selinux/releases/download/3.11/libsepol-3.11.tar.gz"
 # Download once and verify against a pinned checksum.
@@ -115,10 +111,4 @@ find_build_python() {
       BUILD_PYTHON="$c"; return
     fi
   done
-}
-# Which graphics stack images are built for: GBOS_GRAPHICS, else the app's Settings choice.
-# virgl is the standard one; gfxstream (build-gfxstream.sh) is faster but experimental.
-graphics_choice() {
-  local g="${GBOS_GRAPHICS:-$(defaults read local.googlebook.viewer Graphics 2>/dev/null || true)}"
-  [ "$g" = gfxstream ] && echo gfxstream || echo virgl
 }

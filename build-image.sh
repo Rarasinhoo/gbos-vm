@@ -7,16 +7,12 @@
 [ "${GBOS_IMAGE_DIR:-$WORK/image}" != "$WORK/image" ] || no_running_vm
 need brew "https://brew.sh"; need lz4 "brew install lz4"
 GUEST="${GOOGLEBOOK_GUEST_DIR:-$WORK/guest}"; TOOLS="${GOOGLEBOOK_TOOLS_DIR:-$WORK/tools}"
-for f in "$WORK/googlebook/mica-recovery.raw" "$WORK/cuttlefish/manifest.json" "$WORK/cuttlefish/camera/com.google.emulated.camera.provider.hal.v4l2.apex" "$GUEST/libvulkan_virtio.so" \
-         "$WORK/cuttlefish/bluetooth/android.hardware.bluetooth-service.cuttlefish" "$GUEST/mesa-runtime/libgallium_dri.so" "$GUEST/vm-input.jar" "$TOOLS/guest_graphics_memfd_policy"; do
+for f in "$WORK/googlebook/mica-recovery.raw" "$WORK/cuttlefish/manifest.json" "$WORK/cuttlefish/camera/com.google.emulated.camera.provider.hal.v4l2.apex" \
+         "$WORK/cuttlefish/bluetooth/android.hardware.bluetooth-service.cuttlefish" "$GUEST/vm-input.jar" "$TOOLS/guest_graphics_memfd_policy"; do
   [ -e "$f" ] || die "missing input: $f"
 done
 IMAGE_DIR="${GBOS_IMAGE_DIR:-$WORK/image}"
-GRAPHICS_FLAGS=""
-case " ${GBOS_IMAGE_FLAGS:-} " in *" --gfxstream "*) ;; *) [ "$(graphics_choice)" = gfxstream ] && GRAPHICS_FLAGS="--gfxstream" ;; esac
-case " ${GBOS_IMAGE_FLAGS:-} $GRAPHICS_FLAGS " in *" --gfxstream "*)
-  [ -f "$GUEST/vulkan.gfxstream.so" ] && [ -f "$WORK/build/qemu-gfx/libqemu-aarch64-softmmu.dylib" ] || "$ROOT/build-gfxstream.sh" ;;
-esac
+[ -f "$GUEST/vulkan.gfxstream.so" ] && [ -f "$GUEST/libdrm.so" ] && [ -f "$WORK/build/qemu-gfx/libqemu-aarch64-softmmu.dylib" ] || "$ROOT/build-gfxstream.sh"
 [ -e "$IMAGE_DIR/googlebook.raw" ] && die "$IMAGE_DIR already has a disk; move it away first (it holds your data)"
 
 # The image scripts expect one root folder with fixed relative paths (artifacts/, experiments/,
@@ -45,8 +41,8 @@ python3 scripts/make_mica_gpu_initrd.py >>"$WORK/build-image.log" 2>&1 || { tail
 
 say "Vendor overlay, policy and services"
 python3 scripts/make_mica_security_port.py base --graphics --audio --vm-compat --locksettings --offline-desktop \
-  --quiet-diagnostics --runtime-diagnostics --crash-diagnostics --venus --vulkan-desktop --quiet-absent-hardware \
-  --host-control --host-input --bluetooth --camera $GRAPHICS_FLAGS ${GBOS_IMAGE_FLAGS:-} >>"$WORK/build-image.log" 2>&1 || { tail -30 "$WORK/build-image.log"; die "image assembly failed"; }
+  --quiet-diagnostics --crash-diagnostics --venus --vulkan-desktop --quiet-absent-hardware \
+  --host-control --host-input --bluetooth --camera --gfxstream ${GBOS_IMAGE_FLAGS:-} >>"$WORK/build-image.log" 2>&1 || { tail -30 "$WORK/build-image.log"; die "image assembly failed"; }
 
 say "User data area and extra kernel modules"
 { python3 scripts/expand_mica_userdata.py artifacts/mica/base/googlebook.raw \

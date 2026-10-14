@@ -1,7 +1,7 @@
 #!/bin/bash
-# Build the Mac-side pieces: the patched virglrenderer (Venus + Android buffer sharing),
-# a copy of UTM's QEMU library that loads it, and the small QEMU launcher.
-# Output: $WORK/host/{qemu-interop,qemu-aarch64-softmmu,libvirglrenderer.1.dylib,virgl_render_server}
+# Build the Mac-side pieces: the build tools environment, libepoxy headers for QEMU's OpenGL
+# display, the small QEMU launcher and the viewer app. QEMU itself and the renderer come from
+# build-gfxstream.sh. Output: $WORK/host/{qemu-interop,Googlebook VM.app}
 . "$(dirname "$0")/lib.sh"
 no_running_vm
 need git "Xcode command line tools"; need clang "Xcode command line tools"
@@ -52,26 +52,6 @@ Description: UTM's bundled Vulkan loader
 Version: 1.4.0
 Libs: -F$FW -framework vulkan.1
 PC
-
-say "virglrenderer (UTM fork) with the Android interop patch"
-checkout "$VIRGL_REPO" "$VIRGL_COMMIT" "$WORK/src/virglrenderer"
-apply_patch "$WORK/src/virglrenderer" "$ROOT/patches/virglrenderer-android-interop.patch"
-[ -f "$WORK/build/virglrenderer/build.ninja" ] || PKG_CONFIG_PATH="$WORK/pkgconfig" meson setup \
-  "$WORK/build/virglrenderer" "$WORK/src/virglrenderer" --buildtype=release \
-  -Dvenus=true -Dneptune=true -Dvulkan-dload=false -Dplatforms=egl -Dtests=false -Dvtest=false \
-  -Dcheck-gl-errors=false --prefix="$WORK/sysroot" >/dev/null
-ninja -j "$JOBS" -C "$WORK/build/virglrenderer" >/dev/null
-cp "$WORK/build/virglrenderer/src/libvirglrenderer.1.dylib" "$WORK/build/virglrenderer/server/virgl_render_server" "$WORK/host/"
-
-say "QEMU library that loads the patched renderer"
-# UTM's QEMU links virglrenderer as a framework; repoint that one load command at our build.
-cp "$FW/qemu-aarch64-softmmu.framework/Versions/A/qemu-aarch64-softmmu" "$WORK/host/qemu-aarch64-softmmu"
-chmod u+w "$WORK/host/qemu-aarch64-softmmu"
-install_name_tool -change @rpath/virglrenderer.1.framework/Versions/A/virglrenderer.1 \
-  @loader_path/libvirglrenderer.1.dylib "$WORK/host/qemu-aarch64-softmmu" 2>/dev/null
-otool -arch arm64 -L "$WORK/host/qemu-aarch64-softmmu" | grep -q "@loader_path/libvirglrenderer.1.dylib" \
-  || die "could not repoint QEMU at the patched renderer"
-codesign --force --sign - "$WORK/host/qemu-aarch64-softmmu" 2>/dev/null
 
 say "QEMU launcher with the hypervisor entitlement"
 clang -O2 "$ROOT/host/qemu-launcher.c" -o "$WORK/host/qemu-interop"

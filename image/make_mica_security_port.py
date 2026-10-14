@@ -104,14 +104,16 @@ if '--allocator-alignment' in sys.argv:
 if '--venus' in sys.argv:
  # Add application Vulkan via Venus; keep SurfaceFlinger/HWUI on tested GLES.
  driver=GUEST/'libvulkan_virtio.so' if GUEST else R/'experiments/mesa-venus-android-build/src/virtio/vulkan/libvulkan_virtio.so'
- add('lib64/hw/vulkan.virtio.so',driver.read_bytes(),'same_process_hal_file')
+ if '--gfxstream' not in sys.argv:  # gfxstream brings its own Vulkan driver
+  add('lib64/hw/vulkan.virtio.so',driver.read_bytes(),'same_process_hal_file')
  # Keep the diagnostic in shell, which already belongs to gpu_sphal_domain.
  add('bin/vm-vulkan-probe',(GUEST/'guest-vulkan-probe' if GUEST else R/'artifacts/graphics-port-review/guest-vulkan-probe').read_bytes(),'shell_exec',0o755)
  b,label,mode=files['build.prop']
  assert b'ro.hardware.vulkan=none\n' in b
  files['build.prop']=(b.replace(b'ro.hardware.vulkan=none\n',b'ro.hardware.vulkan=virtio\n'),label,mode)
- add('bin/vm-vulkan-startup.sh',(R/'scripts/guest_vulkan_startup.sh').read_bytes(),'vendor_shell_exec',0o755)
- add('etc/init/vm-vulkan-probe.rc',b'''service vm-vulkan-probe /system/bin/sh /vendor/bin/vm-vulkan-startup.sh
+ if '--self-test' in sys.argv:  # graphics self-tests at every boot: for test images only
+  add('bin/vm-vulkan-startup.sh',(R/'scripts/guest_vulkan_startup.sh').read_bytes(),'vendor_shell_exec',0o755)
+  add('etc/init/vm-vulkan-probe.rc',b'''service vm-vulkan-probe /system/bin/sh /vendor/bin/vm-vulkan-startup.sh
     disabled
     oneshot
     user shell
@@ -122,7 +124,7 @@ if '--venus' in sys.argv:
 on post-fs-data
     start vm-vulkan-probe
 ''','vendor_configs_file')
- (O/'venus-experiment.json').write_text(json.dumps({'status':'Venus Vulkan driver installed','driver_sha256':hashlib.sha256(driver.read_bytes()).hexdigest(),'driver':'Mesa 26.2.4 Android ARM64 Venus','desktop':'retains GLES','test':'enumerate Vulkan device, fill 4KiB buffer and verify readback','security_policy':'unchanged'})+'\n')
+ if '--gfxstream' not in sys.argv: (O/'venus-experiment.json').write_text(json.dumps({'status':'Venus Vulkan driver installed','driver_sha256':hashlib.sha256(driver.read_bytes()).hexdigest(),'driver':'Mesa 26.2.4 Android ARM64 Venus','desktop':'retains GLES','test':'enumerate Vulkan device, fill 4KiB buffer and verify readback','security_policy':'unchanged'})+'\n')
 if '--quiet-absent-hardware' in sys.argv:
  # The VM has no TPM or Trusty. Left alone, init restarts these services (and dumps a
  # tombstone) every 5 seconds. Disable them before they first start. (A stop-on-restart
@@ -190,18 +192,13 @@ on post-fs-data
     start vm-perf-test
 ''','vendor_configs_file')
 if '--gfxstream' in sys.argv:
- # Experimental: gfxstream graphics (the device is virtio-gpu-rutabaga, see build-gfxstream.sh).
- # GLES is Android's own ANGLE on gfxstream's Vulkan driver, which reaches the Mac's GPU through
- # MoltenVK; buffers stay with minigbm, which gfxstream's driver reads as such.
- assert '--venus' in sys.argv
+ # gfxstream graphics (the device is virtio-gpu-rutabaga, see build-gfxstream.sh). GLES is
+ # Android's own ANGLE on gfxstream's Vulkan driver, which reaches the Mac's GPU through MoltenVK;
+ # buffers stay with minigbm, which gfxstream's driver reads as such.
+ assert '--venus' in sys.argv and GUEST
  # The driver must speak the same protocol revision as the Mac's renderer: build-gfxstream.sh
- # builds it from the matching Mesa; Cuttlefish's prebuilt one is the fallback.
- if GUEST and (GUEST/'vulkan.gfxstream.so').exists():
-  add('lib64/hw/vulkan.ranchu.so',(GUEST/'vulkan.gfxstream.so').read_bytes(),'same_process_hal_file')
- else:
-  G=R/'artifacts/cuttlefish-gfxstream'
-  add('lib64/hw/vulkan.ranchu.so',(G/'vulkan.ranchu.so').read_bytes(),'same_process_hal_file')
-  for n in ['libOpenglCodecCommon.so','libzstd.so']: add('lib64/'+n,(G/n).read_bytes(),'same_process_hal_file')
+ # builds it from the matching Mesa.
+ add('lib64/hw/vulkan.ranchu.so',(GUEST/'vulkan.gfxstream.so').read_bytes(),'same_process_hal_file')
  b,label,mode=files['build.prop']
  for old,new in [(b'ro.hardware.egl=virgl\n',b'ro.hardware.egl=angle\n'),(b'ro.hardware.vulkan=virtio\n',b'ro.hardware.vulkan=ranchu\n')]:
   assert old in b,old; b=b.replace(old,new)
@@ -231,15 +228,8 @@ if '--vulkan-desktop' in sys.argv:
   before=(k+'='+old+'\n').encode();assert before in b,k
   b=b.replace(before,(k+'='+new+'\n').encode())
  add('build.prop',b,label,mode)
- (O/'vulkan-desktop-experiment.json').write_text(json.dumps({'status':'experimental; Vulkan transfer probe passed, compositor compatibility unverified','properties':{k:v[1] for k,v in props.items()}})+'\n')
+ (O/'vulkan-desktop-experiment.json').write_text(json.dumps({'status':'SurfaceFlinger and app UI render with Vulkan (needed by gfxstream)','properties':{k:v[1] for k,v in props.items()}})+'\n')
 
-if '--full-redraw' in sys.argv:
- # A/B experiment, not the default: distinguish guest buffer-age/partial
- # redraw faults from viewer damage tracking. Official HWUI Properties.h.
- b,label,mode=files['build.prop']
- b+=b'\n# VM graphics diagnostic: redraw complete application surfaces.\ndebug.hwui.use_partial_updates=false\ndebug.hwui.skip_empty_damage=false\n'
- files['build.prop']=(b,label,mode)
- (O/'full-redraw-experiment.json').write_text(json.dumps({'status':'diagnostic A/B trial, not proven fix','properties':{'debug.hwui.use_partial_updates':'false','debug.hwui.skip_empty_damage':'false'}})+'\n')
 if '--runtime-diagnostics' in sys.argv:
  add('etc/init/vm-runtime-diagnostic.rc',b'''service vm-runtime-diagnostic /system/bin/sh /vendor/bin/vm-runtime-diagnostic.sh
     disabled

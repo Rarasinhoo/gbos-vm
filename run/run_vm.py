@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the Googlebook VM once with an explicit QEMU command line.
 
-  run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline | --isolated] [--no-audio] [--no-bluetooth]
+  run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline | --isolated] [--no-audio] [--bluetooth]
             [--webcam] [--microphone] [--display WxH] [--memory MIB] [--cpus N]
 
 WORK is the build folder (host/, image/, UTM-beta/). Logs and sockets go to WORK/logs/RUN_NAME.
@@ -11,9 +11,13 @@ inbound forwards; --offline removes it (the pointer/clipboard helper then cannot
 service listening on this Mac's loopback (plain NAT maps 10.0.2.2 to the Mac's 127.0.0.1).
 On stop, Android is asked to power off through the guest control channel before QEMU is killed.
 
-Bluetooth: if the Android emulator's netsimd is installed (SDK "emulator" package, or set
-GBOS_NETSIMD), it is started as a virtual Bluetooth controller and Android is told it has
-Bluetooth. Otherwise, or with --no-bluetooth, the guest boots with no Bluetooth at all.
+Graphics are gfxstream (build-gfxstream.sh): Android's Vulkan and GLES (ANGLE) run on the Mac's
+GPU through MoltenVK, and frames reach the viewer without a copy through the CPU.
+
+--bluetooth (for development): if the Android emulator's netsimd is installed (SDK "emulator"
+package, or set GBOS_NETSIMD), start it as a virtual Bluetooth controller and tell Android it has
+Bluetooth. It is a simulated radio with nothing real to pair with; without it the guest boots with
+no Bluetooth at all.
 
 --webcam adds a usb-redir port on WORK/logs/RUN_NAME/webcam.sock; the viewer app connects to it
 and plugs in a USB camera backed by the Mac's camera (host/webcam.m). Nothing is plugged in until
@@ -158,38 +162,31 @@ def main():
     a.add_argument('--seconds', type=int, default=3600)
     a.add_argument('--snapshot', action='store_true'); a.add_argument('--offline', action='store_true')
     a.add_argument('--isolated', action='store_true')
-    a.add_argument('--no-audio', action='store_true'); a.add_argument('--no-bluetooth', action='store_true')
+    a.add_argument('--no-audio', action='store_true'); a.add_argument('--bluetooth', action='store_true')
     a.add_argument('--webcam', action='store_true'); a.add_argument('--microphone', action='store_true')
     a.add_argument('--display', default='1920x1200'); a.add_argument('--memory', type=int, default=4096)
     a.add_argument('--cpus', type=int, default=6)
     a.add_argument('--host-refresh', type=float, help="the Mac screen's refresh rate; picks the guest rate that paces best on it")
     a.add_argument('--refresh', type=float, help='guest refresh rate in Hz (overrides --host-refresh; default 75)')
-    a.add_argument('--refresh-cap', type=float, default=120, help='highest guest rate --host-refresh may pick (default 120)')
     a.add_argument('--image', help='image folder (default WORK/image)')
-    a.add_argument('--gpu', choices=('auto', 'virgl', 'gfxstream'), default='auto',
-                   help="the image's own (default): gfxstream for an image built with it (see build-gfxstream.sh), else virgl")
     args = a.parse_args()
     work = Path(args.work).resolve()
     assert args.name.replace('-', '').replace('_', '').isalnum() and 10 <= args.seconds <= 86400
     image = Path(args.image).resolve() if args.image else work / 'image'
-    if args.gpu == 'auto':
-        args.gpu = 'gfxstream' if (image / 'gfxstream.json').exists() else 'virgl'
-    if args.gpu == 'gfxstream' and not (work / 'build/qemu-gfx/libqemu-aarch64-softmmu.dylib').exists():
-        sys.exit('this image uses gfxstream graphics; run ./build-gfxstream.sh first')
+    if not (image / 'gfxstream.json').exists():
+        sys.exit(f'{image} was built for the old virgl graphics; run ./update-image.sh (your data stays)')
+    built = work / 'build/qemu-gfx/libqemu-aarch64-softmmu.dylib'
+    if not built.exists(): sys.exit('missing the gfxstream QEMU; run ./build-gfxstream.sh')
     host, utm = work / 'host', work / 'UTM-beta/UTM.app'
-    for p in (host / 'qemu-interop', host / 'qemu-aarch64-softmmu', host / 'virgl_render_server',
-              image / 'googlebook.raw', image / 'initrd.img', image / 'kernel.Image', utm / 'Contents/Frameworks'):
+    for p in (host / 'qemu-interop', image / 'googlebook.raw', image / 'initrd.img', image / 'kernel.Image', utm / 'Contents/Frameworks'):
         if not p.exists(): sys.exit(f'missing: {p}')
     width, height = args.display.split('x')
-    refresh = args.refresh or (guest_refresh(args.host_refresh, cap=args.refresh_cap) if args.host_refresh else 75)
-    # gfxstream needs our own QEMU build (UTM's has no rutabaga); virgl uses UTM's, repointed.
-    base = host / 'qemu-aarch64-softmmu'
-    if args.gpu == 'gfxstream':
-        # The launcher loads only from its own folder: keep a copy of the gfxstream build there
-        built, base = work / 'build/qemu-gfx/libqemu-aarch64-softmmu.dylib', host / 'qemu-gfx-aarch64-softmmu'
-        if not base.exists() or base.stat().st_mtime < built.stat().st_mtime:
-            shutil.copyfile(built, base.with_suffix('.tmp')); base.with_suffix('.tmp').rename(base)
-    if not base.exists(): sys.exit(f'missing: {base} (run build-gfxstream.sh)')
+    refresh = args.refresh or (guest_refresh(args.host_refresh) if args.host_refresh else 75)
+    # Our own QEMU build (UTM's has no rutabaga device). The launcher loads only from its own
+    # folder, so keep a copy of it there.
+    base = host / 'qemu-gfx-aarch64-softmmu'
+    if not base.exists() or base.stat().st_mtime < built.stat().st_mtime:
+        shutil.copyfile(built, base.with_suffix('.tmp')); base.with_suffix('.tmp').rename(base)
     qemu, edid = qemu_at_refresh(base, refresh), True
     if qemu is None:  # an unknown QEMU build: fall back to the two rates it offers unmodified
         refresh = guest_refresh(args.host_refresh or refresh, any_rate=False)
@@ -207,17 +204,16 @@ def main():
     with os.fdopen(os.open(out / 'token', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as f: f.write(token)
     (out / 'refresh').write_text(f'{refresh:g}\n')  # the viewer locks its presentation to it
 
-    gpu = 'virtio-gpu-gl-pci' if args.gpu == 'virgl' else 'virtio-gpu-rutabaga-pci'
+    gpu = 'virtio-gpu-rutabaga-pci'
     netsim, cmdline = None, CMDLINE
-    netsimd = None if args.no_bluetooth else find_netsimd()
+    netsimd = find_netsimd() if args.bluetooth else None
     if netsimd:
         netsim, bt_port = start_netsimd(netsimd, out)
         cmdline += ' androidboot.product.vendor.sku=vmbt'
     print('bluetooth:', f'virtual controller ({netsimd})' if netsimd else 'none', flush=True)
 
     cmd = [str(host / 'qemu-interop'), '-L', str(utm / 'Contents/Resources/qemu'), '-nodefaults', '-vga', 'none',
-           '-nic', 'none', '-device', gpu + (',hostmem=8G,blob=true,venus=true' if args.gpu == 'virgl' else
-                                             ',hostmem=8G,gfxstream-vulkan=on' + os.environ.get('GBOS_GFXSTREAM_DEVICE', '')),
+           '-nic', 'none', '-device', gpu + ',hostmem=8G,gfxstream-vulkan=on' + os.environ.get('GBOS_GFXSTREAM_DEVICE', ''),
            '-global', f'{gpu}.xres={width}', '-global', f'{gpu}.yres={height}',
            *([] if edid else ['-global', f'{gpu}.edid=off']),
            '-cpu', 'host', '-smp', f'cpus={args.cpus},sockets=1,cores={args.cpus},threads=1',
@@ -255,8 +251,6 @@ def main():
     # The launcher loads only builds from its own folder, chosen by file name
     env = dict(os.environ, VM_QEMU_LIBRARY=qemu.name,
                DYLD_FRAMEWORK_PATH=str(utm / 'Contents/Frameworks'),
-               RENDER_SERVER_EXEC_PATH=str(host / 'virgl_render_server'),
-               VK_DRIVER_FILES=str(utm / 'Contents/Resources/vulkan/icd.d/MoltenVK_icd.json'),
                ANGLE_DEFAULT_PLATFORM='metal', XDG_RUNTIME_DIR=str(out), TMPDIR=str(out),
                # HVF cannot map Metal's own memory into the guest: give gfxstream ordinary memory
                # for everything the guest maps, imported into Vulkan (VK_EXT_external_memory_host).

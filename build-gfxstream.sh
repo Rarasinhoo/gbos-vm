@@ -1,14 +1,13 @@
 #!/bin/bash
-# Experimental: the gfxstream graphics stack (Google's Android-emulator renderer), to replace
-# virglrenderer one day. Not used by install.sh or the app yet.
+# The graphics stack: gfxstream (Google's Android-emulator renderer).
 #   gfxstream host renderer (Vulkan on MoltenVK), from the macOS work in google/gfxstream#168
 #   rutabaga_gfx with gfxstream, the C library QEMU drives it through
 #   QEMU 10.0.12 with UTM's changes, built as a library with the virtio-gpu-rutabaga device
 #   the guest's gfxstream Vulkan driver, from the Mesa revision the host renderer was cut from
-# Needs build-host.sh and build-guest.sh to have run first, plus Rust, CMake and Bazel
+# Needs build-host.sh and build-guest.sh to have run first (install.sh runs it after them), plus Rust, CMake and Bazel
 # (brew install rust cmake bazelisk). Output: $WORK/build/gfxstream/lib,
 # $WORK/build/qemu-gfx/libqemu-aarch64-softmmu.dylib, $WORK/host/lib64/vulkan/libvulkan.dylib,
-# $WORK/guest/vulkan.gfxstream.so.
+# $WORK/guest/{vulkan.gfxstream.so,libdrm.so}.
 . "$(dirname "$0")/lib.sh"
 need cargo "brew install rust"; need cmake "brew install cmake"; need bazelisk "brew install bazelisk"
 [ -x "$WORK/env/bin/meson" ] && [ -f "$WORK/pkgconfig/epoxy.pc" ] || die "run build-host.sh first"
@@ -72,10 +71,10 @@ mkdir -p "$WORK/build/qemu-gfx"
 # build; neither is needed here. UTM's SPICE GL path uses an ANGLE constant its epoxy headers
 # don't generate: GL_TEXTURE_RECTANGLE_ANGLE is 0x84F5, the ARB rectangle target.
 ( cd "$WORK/build/qemu-gfx" && \
-  PKG_CONFIG_PATH="$R/pkgconfig:$WORK/pkgconfig:$WORK/build/virglrenderer/meson-uninstalled:$(brew --prefix)/lib/pkgconfig" \
+  PKG_CONFIG_PATH="$R/pkgconfig:$WORK/pkgconfig:$(brew --prefix)/lib/pkgconfig" \
   "$QSRC/configure" --target-list=aarch64-softmmu --enable-shared-lib --disable-cocoa --disable-sdl \
     --disable-gtk --disable-vte --disable-docs --disable-werror --disable-pvg --extra-cflags=-DGL_TEXTURE_RECTANGLE_ANGLE=0x84F5 \
-    --enable-hvf --enable-spice --enable-opengl --enable-virglrenderer --enable-rutabaga-gfx --enable-slirp \
+    --enable-hvf --enable-spice --enable-opengl --disable-virglrenderer --enable-rutabaga-gfx --enable-slirp \
     --enable-libusb --enable-usb-redir --enable-coreaudio && \
   ninja -j "$JOBS" libqemu-aarch64-softmmu.dylib ) >"$WORK/build/qemu-gfx.log" 2>&1 \
   || { grep -E 'FAILED|error:' "$WORK/build/qemu-gfx.log" | head; die "QEMU build failed"; }
@@ -118,9 +117,10 @@ DEFS="-DANDROID -DANDROID_API_LEVEL=35"
   -Dgles1=disabled -Dgles2=disabled -Dopengl=false -Db_lundef=false -Dpkg_config_path="$SH/pkgconfig" \
   -Dc_args="$DEFS" -Dcpp_args="$DEFS -include $SH/include/gbos_vndk_window.h" >"$WORK/build/mesa-gfxstream.configure.log" 2>&1 \
   || { tail -20 "$WORK/build/mesa-gfxstream.configure.log"; die "gfxstream guest configure failed"; }
-ninja -j "$JOBS" -C "$WORK/build/mesa-gfxstream" src/gfxstream/guest/vulkan/libvulkan_gfxstream.so >"$WORK/build/mesa-gfxstream.build.log" 2>&1 \
+ninja -j "$JOBS" -C "$WORK/build/mesa-gfxstream" src/gfxstream/guest/vulkan/libvulkan_gfxstream.so subprojects/libdrm-2.4.133/libdrm.so >"$WORK/build/mesa-gfxstream.build.log" 2>&1 \
   || { grep -E 'error:|FAILED' "$WORK/build/mesa-gfxstream.build.log" | head; die "gfxstream guest build failed"; }
 "$NDK_BIN/llvm-strip" --strip-unneeded -o "$WORK/guest/vulkan.gfxstream.so" "$WORK/build/mesa-gfxstream/src/gfxstream/guest/vulkan/libvulkan_gfxstream.so"
+"$NDK_BIN/llvm-strip" --strip-unneeded -o "$WORK/guest/libdrm.so" "$WORK/build/mesa-gfxstream/subprojects/libdrm-2.4.133/libdrm.so"
 
 say "gfxstream build complete"
 ls -lh "$WORK/build/gfxstream/lib/libgfxstream_backend.dylib" "$WORK/build/qemu-gfx/libqemu-aarch64-softmmu.dylib" "$WORK/guest/vulkan.gfxstream.so"
