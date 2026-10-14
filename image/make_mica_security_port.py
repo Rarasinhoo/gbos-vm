@@ -282,6 +282,12 @@ if '--offline-desktop' in sys.argv:
 
 on property:sys.boot_completed=1
     start vm-offline-desktop
+
+# The Mac decides when this machine sleeps; Android must never suspend it. Nothing the viewer
+# sends (network input, or even the USB keyboard) wakes a suspended VM, so the window would stay
+# black. Android suspends only once nothing holds a wake lock: hold one for good.
+on boot
+    write /sys/power/wake_lock gbos_vm
 ''','vendor_configs_file')
  add('bin/vm-offline-desktop.sh',(R/'scripts/guest_offline_desktop.sh').read_bytes(),'vendor_shell_exec',0o755)
  (O/'offline-desktop.json').write_text(json.dumps({'purpose':'skip first-run setup on fresh userdata','source':'AOSP Provision DefaultActivity provisioning flags','accounts':'none','consumer_onboarding':'not completed'})+'\n')
