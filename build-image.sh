@@ -3,7 +3,8 @@
 # the guest components. Output: $WORK/image/{googlebook.raw,initrd.img,kernel.Image}
 # Never modifies the downloaded image; works on copy-on-write clones.
 . "$(dirname "$0")/lib.sh"
-no_running_vm
+# Only your own disk is in use while a VM runs; a test image elsewhere can be built beside it
+[ "${GBOS_IMAGE_DIR:-$WORK/image}" != "$WORK/image" ] || no_running_vm
 need brew "https://brew.sh"; need lz4 "brew install lz4"
 GUEST="${GOOGLEBOOK_GUEST_DIR:-$WORK/guest}"; TOOLS="${GOOGLEBOOK_TOOLS_DIR:-$WORK/tools}"
 for f in "$WORK/googlebook/mica-recovery.raw" "$WORK/cuttlefish/manifest.json" "$GUEST/libvulkan_virtio.so" \

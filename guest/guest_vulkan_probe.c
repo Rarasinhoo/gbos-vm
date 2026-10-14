@@ -19,21 +19,22 @@
 
 /* --yuv FORMAT: what a video decoder hands the compositor. Fill a YUV buffer from the CPU with
  * BT.601 red, sample it through GLES as an external texture, and check the colour that comes out. */
-static int test_yuv(uint32_t format) {
- AHardwareBuffer_Desc desc={.width=64,.height=64,.layers=1,.format=format,.usage=AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN|AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE};
+static int test_yuv(uint32_t format, unsigned width) {
+ AHardwareBuffer_Desc desc={.width=width,.height=64,.layers=1,.format=format,.usage=AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN|AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE};
  AHardwareBuffer *ahb=NULL;int rc=AHardwareBuffer_allocate(&desc,&ahb);
  printf("VM_YUV format=%#x allocate_rc=%d\n",format,rc);if(rc||!ahb)return 2;
  AHardwareBuffer_Planes planes;rc=AHardwareBuffer_lockPlanes(ahb,AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,-1,NULL,&planes);
  if(rc||planes.planeCount<3){printf("VM_YUV lock_rc=%d planes=%u\n",rc,planes.planeCount);return 3;}
+ for(int p=0;p<3;p++)printf("VM_YUV width=%u plane=%d offset=%td row=%u pixel=%u\n",width,p,(char*)planes.planes[p].data-(char*)planes.planes[0].data,planes.planes[p].rowStride,planes.planes[p].pixelStride);
  const unsigned char value[3]={81,90,240}; /* Y, Cb, Cr of red */
- for(int p=0;p<3;p++){unsigned w=p?32:64,h=p?32:64;
+ for(int p=0;p<3;p++){unsigned w=p?(width+1)/2:width,h=p?32:64;
    for(unsigned y=0;y<h;y++)for(unsigned x=0;x<w;x++)((unsigned char*)planes.planes[p].data)[y*planes.planes[p].rowStride+x*planes.planes[p].pixelStride]=value[p];}
  AHardwareBuffer_unlock(ahb,NULL);
  EGLDisplay display=eglGetDisplay(EGL_DEFAULT_DISPLAY);if(!eglInitialize(display,NULL,NULL))return 4;
  EGLint attributes[]={EGL_SURFACE_TYPE,EGL_PBUFFER_BIT,EGL_RENDERABLE_TYPE,EGL_OPENGL_ES2_BIT,EGL_RED_SIZE,8,EGL_GREEN_SIZE,8,EGL_BLUE_SIZE,8,EGL_NONE};
  EGLConfig config;EGLint n;if(!eglChooseConfig(display,attributes,&config,1,&n)||!n)return 5;
  EGLint context_attributes[]={EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE};EGLContext context=eglCreateContext(display,config,EGL_NO_CONTEXT,context_attributes);
- EGLint surface_attributes[]={EGL_WIDTH,64,EGL_HEIGHT,64,EGL_NONE};EGLSurface surface=eglCreatePbufferSurface(display,config,surface_attributes);
+ EGLint surface_attributes[]={EGL_WIDTH,(EGLint)width,EGL_HEIGHT,64,EGL_NONE};EGLSurface surface=eglCreatePbufferSurface(display,config,surface_attributes);
  if(!eglMakeCurrent(display,surface,surface,context))return 6;
  PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC client=(void*)eglGetProcAddress("eglGetNativeClientBufferANDROID");
  PFNEGLCREATEIMAGEKHRPROC create_image=(void*)eglGetProcAddress("eglCreateImageKHR");
@@ -49,16 +50,16 @@ static int test_yuv(uint32_t format) {
  for(int i=0;i<2;i++){GLuint sh=glCreateShader(type[i]);glShaderSource(sh,1,&src[i],NULL);glCompileShader(sh);GLint ok;glGetShaderiv(sh,GL_COMPILE_STATUS,&ok);if(!ok){char log[512];glGetShaderInfoLog(sh,512,NULL,log);printf("VM_YUV shader %d: %s\n",i,log);return 8;}glAttachShader(prog,sh);}
  glBindAttribLocation(prog,0,"p");glLinkProgram(prog);glUseProgram(prog);
  const float quad[]={-1,-1,1,-1,-1,1,1,1};glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,0,quad);glEnableVertexAttribArray(0);
- glViewport(0,0,64,64);glDrawArrays(GL_TRIANGLE_STRIP,0,4);
- unsigned char px[4]={0};glReadPixels(32,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);GLenum error=glGetError();
+ glViewport(0,0,width,64);glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+ unsigned char px[4]={0};glReadPixels(width/2,32,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);GLenum error=glGetError();
  int pass=px[0]>220&&px[1]<45&&px[2]<45&&error==GL_NO_ERROR;
- printf("VM_YUV format=%#x GLES_SAMPLE=%s rgba=%u,%u,%u,%u gl_error=%x\n",format,pass?"PASS":"FAIL",px[0],px[1],px[2],px[3],error);
+ printf("VM_YUV width=%u format=%#x GLES_SAMPLE=%s rgba=%u,%u,%u,%u gl_error=%x\n",width,format,pass?"PASS":"FAIL",px[0],px[1],px[2],px[3],error);
  eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);eglTerminate(display);AHardwareBuffer_release(ahb);
  return pass?0:9;
 }
 
 int main(int argc, char **argv) {
- if(argc>2 && !strcmp(argv[1],"--yuv")){setbuf(stdout,NULL);return test_yuv((uint32_t)strtoul(argv[2],NULL,0));}
+ if(argc>2 && !strcmp(argv[1],"--yuv")){setbuf(stdout,NULL);return test_yuv((uint32_t)strtoul(argv[2],NULL,0),argc>3?(unsigned)atoi(argv[3]):64);}
  // --ahb-render-bgra: the same with a BGRA buffer (HAL format 5), what SurfaceFlinger composites
  int test_bgra=argc>1 && !strcmp(argv[1],"--ahb-render-bgra");
  int test_render=test_bgra || (argc>1 && !strcmp(argv[1],"--ahb-render"));

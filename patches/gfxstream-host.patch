@@ -84,8 +84,25 @@ index f974dad1..9c2bd992 100644
  VG_EXPORT void stream_renderer_flush(uint32_t res_handle) {
      GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_STREAM_RENDERER_CATEGORY, "stream_renderer_flush()");
  
+diff --git a/host/virtio_gpu_resource.cpp b/host/virtio_gpu_resource.cpp
+index cffb8923..e76bbaa0 100644
+--- a/host/virtio_gpu_resource.cpp
++++ b/host/virtio_gpu_resource.cpp
+@@ -175,7 +175,11 @@ std::optional<VirtioGpuResource> VirtioGpuResource::Create(
+             return std::nullopt;
+         }
+         auto format = *formatOpt;
+-        const bool linear = (args->bind & VIRGL_BIND_LINEAR) != 0;
++        // The guest samples YUV buffers through images of optimal tiling bound to this
++        // ColorBuffer's memory; a linear ColorBuffer does not lay its planes out the same way
++        // (on MoltenVK), so YV12 video came out in the wrong colours. Its CPU access goes
++        // through transfers, which do not care.
++        const bool linear = (args->bind & VIRGL_BIND_LINEAR) != 0 && !IsYuvFormat(format);
+ 
+         if (!FrameBuffer::getFB()->createColorBufferWithResourceHandle(args->width, args->height,
+                                                                        format, args->handle, linear)) {
 diff --git a/host/vulkan/vk_common_operations.cpp b/host/vulkan/vk_common_operations.cpp
-index 50de4f4a..7b9670f5 100644
+index 50de4f4a..9795e051 100644
 --- a/host/vulkan/vk_common_operations.cpp
 +++ b/host/vulkan/vk_common_operations.cpp
 @@ -2080,6 +2080,37 @@ MTLResource_id VkEmulation::getMtlResourceFromVkDeviceMemory(VulkanDispatch* vk,
@@ -126,6 +143,91 @@ index 50de4f4a..7b9670f5 100644
  #endif
  
  #ifdef __ANDROID__
+@@ -3451,6 +3482,51 @@ bool VkEmulation::colorBufferNeedsUpdateBetweenGlAndVk(uint32_t colorBufferHandl
+     return colorBufferNeedsUpdateBetweenGlAndVk(*colorBufferInfo);
+ }
+ 
++// YV12 and YV21 arrive in Android's layout: Y rows padded to 32 bytes, then two chroma planes
++// (V first for YV12, U first for YV21) with half that stride. They are kept in NV12-shaped images
++// (see ToVkFormat); this moves the bytes between the two layouts. `copies` describes the image's
++// staging layout: plane 0 (Y), then plane 1 (interleaved UV).
++static bool IsPlanar420(GfxstreamFormat format) {
++    return format == GfxstreamFormat::YV12 || format == GfxstreamFormat::YV21;
++}
++static size_t Planar420Size(uint32_t width, uint32_t height) {
++    const size_t yStride = (width + 31) & ~31u;
++    return yStride * height + 2 * (yStride / 2) * (height / 2);
++}
++static void ConvertPlanar420(GfxstreamFormat format, const VkExtent3D& extent,
++                             const std::vector<VkBufferImageCopy>& copies, uint8_t* planar,
++                             uint8_t* staging, bool toStaging) {
++    const uint32_t w = extent.width, h = extent.height;
++    const size_t yStride = (w + 31) & ~31u, cStride = yStride / 2, cHeight = h / 2;
++    uint8_t* first = planar + yStride * h;
++    uint8_t* second = first + cStride * cHeight;
++    uint8_t* u = format == GfxstreamFormat::YV12 ? second : first;
++    uint8_t* v = format == GfxstreamFormat::YV12 ? first : second;
++    const VkBufferImageCopy& yCopy = copies[0];
++    const VkBufferImageCopy& cCopy = copies[1];
++    const size_t yRow = yCopy.bufferRowLength ? yCopy.bufferRowLength : yCopy.imageExtent.width;
++    const size_t cRow = 2 * (cCopy.bufferRowLength ? cCopy.bufferRowLength : cCopy.imageExtent.width);
++    const uint32_t cWidth = std::min<uint32_t>(cCopy.imageExtent.width, cStride);
++    const uint32_t cRows = std::min<uint32_t>(cCopy.imageExtent.height, cHeight);
++    for (uint32_t row = 0; row < h; ++row) {
++        uint8_t* s = staging + yCopy.bufferOffset + row * yRow;
++        uint8_t* p = planar + row * yStride;
++        if (toStaging) std::memcpy(s, p, w); else std::memcpy(p, s, w);
++    }
++    for (uint32_t row = 0; row < cRows; ++row) {
++        uint8_t* s = staging + cCopy.bufferOffset + row * cRow;
++        for (uint32_t x = 0; x < cWidth; ++x) {
++            if (toStaging) {
++                s[2 * x] = u[row * cStride + x];
++                s[2 * x + 1] = v[row * cStride + x];
++            } else {
++                u[row * cStride + x] = s[2 * x];
++                v[row * cStride + x] = s[2 * x + 1];
++            }
++        }
++    }
++}
++
+ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, std::vector<uint8_t>* bytes) {
+     std::lock_guard<std::mutex> lock(mMutex);
+ 
+@@ -3671,7 +3747,16 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
+         VK_CHECK(vk->vkInvalidateMappedMemoryRanges(mDevice, 1, &toInvalidate));
+     }
+ 
+-    if (transferInfo.unpackFunction) {
++    if (IsPlanar420(colorBufferInfo->format) && bufferImageCopies.size() == 2) {
++        if (Planar420Size(w, h) > outPixelsSize) {
++            GFXSTREAM_ERROR("Failed to read from ColorBuffer:%d, output buffer too small.",
++                            colorBufferHandle);
++            return false;
++        }
++        ConvertPlanar420(colorBufferInfo->format, colorBufferInfo->imageCreateInfoShallow.extent,
++                         bufferImageCopies, (uint8_t*)outPixels, (uint8_t*)mStaging.mMappedPtr,
++                         false);
++    } else if (transferInfo.unpackFunction) {
+         // The unpacked output never exceeds the staging copy size (the std::vector overload above
+         // sizes its destination to exactly bufferCopySize). outPixelsSize is guest-controlled, so
+         // reject a destination that is too small rather than letting unpackFunction write past it.
+@@ -4228,6 +4313,14 @@ bool VkEmulation::updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, u
+                             formatString.c_str(), internalFormatString.c_str());
+             return false;
+         }
++    } else if (IsPlanar420(colorBufferInfo->format) && bufferImageCopies.size() == 2) {
++        if (inputPixelsSize != 0 && inputPixelsSize < Planar420Size(w, h)) {
++            GFXSTREAM_ERROR("Unexpected contents size when trying to update ColorBuffer:%d",
++                            colorBufferHandle);
++            return false;
++        }
++        ConvertPlanar420(colorBufferInfo->format, colorBufferInfo->imageCreateInfoShallow.extent,
++                         bufferImageCopies, (uint8_t*)pixels, (uint8_t*)stagingBufferPtr, true);
+     } else if (transferInfo.packFunction) {
+         // packFunction reads the natural-format pixels, which never exceed dstBufferSize. pixels is
+         // guest-controlled, so reject an input smaller than that to avoid an out-of-bounds read
 diff --git a/host/vulkan/vk_common_operations.h b/host/vulkan/vk_common_operations.h
 index 6b60ac1a..c0614212 100644
 --- a/host/vulkan/vk_common_operations.h
@@ -139,3 +241,40 @@ index 6b60ac1a..c0614212 100644
  #endif
  
      bool readBufferToBytes(uint32_t bufferHandle, uint64_t offset, uint64_t size, void* outBytes);
+diff --git a/host/vulkan/vk_format_utils.cpp b/host/vulkan/vk_format_utils.cpp
+index 71d74b1a..fb3e262b 100644
+--- a/host/vulkan/vk_format_utils.cpp
++++ b/host/vulkan/vk_format_utils.cpp
+@@ -364,10 +364,13 @@ std::optional<VkFormat> ToVkFormat(GfxstreamFormat format) {
+             return VK_FORMAT_S8_UINT;
+         case GfxstreamFormat::UNKNOWN:
+             return std::nullopt;
++        // Kept NV12-shaped: on MoltenVK a guest image bound to a 3-plane ColorBuffer's memory
++        // does not find the planes where the ColorBuffer put them, so video in YV12 (what
++        // Android's software decoders hand the compositor) came out in the wrong colours.
++        // The bytes are converted on the way in and out (see ConvertPlanar420).
+         case GfxstreamFormat::YV21:
+-            return VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+         case GfxstreamFormat::YV12:
+-            return VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
++            return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+         case GfxstreamFormat::A1B5G5R5_UNORM:
+             return VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR;
+         case GfxstreamFormat::A8_UNORM:
+diff --git a/host/vulkan/vk_utils.cpp b/host/vulkan/vk_utils.cpp
+index 18b5335a..e1c9457d 100644
+--- a/host/vulkan/vk_utils.cpp
++++ b/host/vulkan/vk_utils.cpp
+@@ -324,8 +324,11 @@ bool YcbcrSamplerPool::getOrCreateSamplerInfo(GfxstreamFormat format, YCbCrSampl
+         return false;
+     }
+     auto chromaOrdering = *chromaOrderingOpt;
++    // YV12 and YV21 are stored with their chroma interleaved in UV order (see ToVkFormat)
++    const bool storedAsUv = chromaOrdering == YuvChromaOrdering::UV ||
++                            format == GfxstreamFormat::YV12 || format == GfxstreamFormat::YV21;
+     const VkComponentMapping components =
+-        chromaOrdering == YuvChromaOrdering::UV ?
++        storedAsUv ?
+             VkComponentMapping{
+                 .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                 .g = VK_COMPONENT_SWIZZLE_IDENTITY,

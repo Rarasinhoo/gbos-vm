@@ -92,6 +92,33 @@ index e38c96d..b0eb918 100644
  
  gfxstream_deps += dep_gfxstream_stubs
  
+diff --git a/src/gfxstream/guest/vulkan_enc/AndroidHardwareBuffer.cpp b/src/gfxstream/guest/vulkan_enc/AndroidHardwareBuffer.cpp
+index c4df330..0a1f489 100644
+--- a/src/gfxstream/guest/vulkan_enc/AndroidHardwareBuffer.cpp
++++ b/src/gfxstream/guest/vulkan_enc/AndroidHardwareBuffer.cpp
+@@ -220,18 +220,14 @@ VkResult getAndroidHardwareBufferPropertiesANDROID(
+                         // VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16 on the host.
+                         break;
+                     case DRM_FORMAT_YUV420:
+-                        // YUV420 is a Y-plane, then a U-plane, and then a V-plane and is
+-                        // VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM on the host.
++                    case DRM_FORMAT_YVU420:
++                    case DRM_FORMAT_YVU420_ANDROID:
++                        // The 3-plane formats are stored NV12-shaped on the host, chroma
++                        // interleaved in UV order whichever order the guest wrote them in.
+                         break;
+                     case DRM_FORMAT_NV21:
+                         // NV21 is a Y-plane followed by a interleaved VU-plane and is
+                         // VK_FORMAT_G8_B8R8_2PLANE_420_UNORM on the host.
+-                    case DRM_FORMAT_YVU420:
+-                        // YVU420 is a Y-plane, then a V-plane, and then a U-plane and is
+-                        // VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM on the host.
+-                    case DRM_FORMAT_YVU420_ANDROID:
+-                        // DRM_FORMAT_YVU420_ANDROID is the same as DRM_FORMAT_YVU420 with
+-                        // Android's extra alignement requirements.
+                         ahbFormatProps->samplerYcbcrConversionComponents.r = VK_COMPONENT_SWIZZLE_B;
+                         ahbFormatProps->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_R;
+                         break;
 diff --git a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
 index e73426e..cf3da96 100644
 --- a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
@@ -122,3 +149,22 @@ index a52fdeb..6a545bd 100644
  };
  VK_DEFINE_HANDLE_CASTS(gfxstream_vk_physical_device, base.base, VkPhysicalDevice,
                         VK_OBJECT_TYPE_PHYSICAL_DEVICE)
+diff --git a/src/gfxstream/guest/vulkan_enc/vk_format_info.h b/src/gfxstream/guest/vulkan_enc/vk_format_info.h
+index cda10bc..79e221c 100644
+--- a/src/gfxstream/guest/vulkan_enc/vk_format_info.h
++++ b/src/gfxstream/guest/vulkan_enc/vk_format_info.h
+@@ -62,11 +62,12 @@ static inline VkFormat vk_format_from_fourcc(unsigned fourcc_format) {
+         case HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL:
+         case DRM_FORMAT_NV12:
+         case DRM_FORMAT_NV21:
+-            return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
++        // The host keeps the 3-plane formats NV12-shaped, chroma in UV order (gbos-vm: on
++        // MoltenVK a 3-plane image does not alias the host's copy of the buffer)
+         case DRM_FORMAT_YUV420:
+         case DRM_FORMAT_YVU420_ANDROID:
+         case DRM_FORMAT_YVU420:
+-            return VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
++            return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+         default:
+             return VK_FORMAT_UNDEFINED;
+     }
