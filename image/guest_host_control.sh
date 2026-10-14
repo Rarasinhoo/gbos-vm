@@ -78,6 +78,12 @@ handle() {
       # What is using the guest's CPUs: one snapshot of the busiest processes and threads
       timeout 10 top -b -n 1 -m 20 2>&1 | head -30 | cut -c1-150 | sed 's/^/VM_CONTROL top /'
       timeout 10 top -b -H -n 1 -m 12 2>&1 | tail -n +5 | head -16 | cut -c1-150 | sed 's/^/VM_CONTROL thread /' ;;
+    VM_CAMERA_DIAG)
+      # The webcam from the viewer (host/webcam.m) and what the camera stack made of it.
+      ls -lZ /dev/video* /dev/media* 2>&1 | sed 's/^/VM_CONTROL cam dev /'
+      for d in /sys/class/video4linux/*; do echo "VM_CONTROL cam v4l $d $(cat $d/name 2>/dev/null)"; done
+      ps -A -o PID,NAME 2>/dev/null | grep -i -E 'camera|provider' | sed 's/^/VM_CONTROL cam ps /'
+      timeout 8 dumpsys media.camera 2>&1 | grep -i -E 'Number of camera|Camera ID|provider|Facing|device@|Device [0-9]|status|error' | head -30 | cut -c1-160 | sed 's/^/VM_CONTROL cam svc /' ;;
     VM_STATUS)
       echo "VM_CONTROL boot=$(getprop sys.boot_completed) user=$(timeout 5 am get-current-user) size=$(timeout 5 wm size | tr '\n' ' ') density=$(timeout 5 wm density | tr '\n' ' ')"
       timeout 5 cat /proc/asound/cards 2>&1 | sed 's/^/VM_CONTROL asound /'

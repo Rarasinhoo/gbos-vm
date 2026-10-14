@@ -5,6 +5,8 @@
 #import "CocoaSpice.h"
 #import "CSDisplay+Protected.h"
 #import "CSMetalRenderer.h"
+#import "webcam.h"
+#import "microphone.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <netinet/tcp.h>
@@ -229,6 +231,8 @@ static unsigned short scan[128] = {
 @property(nonatomic) BOOL densitySent;
 @property(nonatomic) NSInteger guestDensity;
 @property(nonatomic,strong) NSPopUpButton *pointerPopup;
+@property(nonatomic,strong) GBWebcam *webcam;
+@property(nonatomic,strong) GBMicrophone *microphone;
 - (void)syncSettingsWindow;
 @property(nonatomic,strong) dispatch_source_t selftest;
 @property(nonatomic,strong) dispatch_source_t selftest2;
@@ -269,7 +273,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  // Android 16 with Google's services swaps hard in 4 GB (laggy screens, CPU spent compressing
  // memory); give it 8 GB on Macs that have the room.
  NSNumber *memory=NSProcessInfo.processInfo.physicalMemory>=24ULL<<30?@8192:@4096;
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Networking":@YES,@"IsolateNetwork":@NO,@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Bluetooth":@YES,@"AndroidTouchpad":@NO,@"RefreshCap":@120}];
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Networking":@YES,@"IsolateNetwork":@NO,@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES,@"Bluetooth":@YES,@"AndroidTouchpad":@NO,@"RefreshCap":@120}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
@@ -375,6 +379,19 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  else if([d boolForKey:@"IsolateNetwork"])[args addObject:@"--isolated"];
  if(![d boolForKey:@"Audio"])[args addObject:@"--no-audio"];
  if(![d boolForKey:@"Bluetooth"])[args addObject:@"--no-bluetooth"];
+ if([d boolForKey:@"Camera"]){
+  // The guest gets a USB webcam backed by this Mac's camera (host/webcam.m). It connects to the
+  // VM's usb-redir socket as soon as QEMU creates it; the camera only runs while Android streams.
+  [args addObject:@"--webcam"];
+  self.webcam=[[GBWebcam alloc] initWithSocketPath:[self.runDir stringByAppendingPathComponent:@"webcam.sock"]];[self.webcam start];
+ }
+ if([d boolForKey:@"Microphone"]){
+  // Likewise a USB microphone backed by this Mac's microphone (host/microphone.m); QEMU itself
+  // can't capture sound on macOS. The Mac microphone only runs while Android records.
+  [args addObject:@"--microphone"];
+  self.microphone=[[GBMicrophone alloc] initWithSocketPath:[self.runDir stringByAppendingPathComponent:@"mic.sock"]];[self.microphone start];
+ }
+ NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];t.arguments=args;
  // Pace the guest to the screen the window opens on (see guest_refresh in run_vm.py).
  [args addObjectsFromArray:@[@"--refresh-cap",[[d objectForKey:@"RefreshCap"] description]]];
  [args addObjectsFromArray:@[@"--host-refresh",[NSString stringWithFormat:@"%g",screenRefresh(self.window.screen?:NSScreen.mainScreen)]]];
@@ -519,7 +536,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
    @[[NSGridCell emptyContentView],[self checkbox:@"Bluetooth" title:@"Bluetooth (virtual radio; needs the Android emulator installed)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
-  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,470) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,530) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
   w.title=@"Googlebook Settings";w.releasedWhenClosed=NO;[w.contentView addSubview:grid];
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;
