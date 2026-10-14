@@ -63,13 +63,13 @@ Resolution defaults to your display's native pixels at 16:10, and Android's UI i
 
 ### Updating
 
-After a `git pull`, rebuild the app and refresh the system part of your disk. Quit the VM first.
+After a `git pull`, quit the VM and run:
 
 ```bash
-./build-host.sh
-./build-gfxstream.sh
 ./update-image.sh
 ```
+
+It rebuilds whatever changed (the app, the guest helpers, the graphics stack) and refreshes the system part of your disk.
 
 `update-image.sh` keeps your data — it only replaces the system area, and it leaves the previous disk next to the new one as `googlebook.raw.before-update` in case something goes wrong.
 
@@ -163,8 +163,8 @@ Nothing from Google or UTM is redistributed here. The script fetches each of the
 - Googlebook recovery image — `dl.google.com` (build `16471258`)
 - Cuttlefish virtual device image — `ci.android.com` (build `16373615`)
 - UTM 5.0.6 beta — the official GitHub release (for MoltenVK, ANGLE and QEMU's firmware)
-- UTM's QEMU 10.0.12 source, gfxstream (the macOS fork from google/gfxstream#168), rutabaga_gfx, Android's Mesa, and one minigbm header — each at a pinned commit or checksum
-- Mesa 26.2.4 (for its kernel interface headers) and libsepol 3.11 — their upstream release tarballs
+- UTM's QEMU 10.0.12 source, gfxstream (the macOS fork from google/gfxstream#168), rutabaga_gfx and Android's Mesa — each at a pinned commit or checksum
+- libsepol 3.11 — its upstream release tarball
 
 ## Credits
 

@@ -4,10 +4,14 @@ set -Eeuo pipefail
 trap 'rc=$?; [ "$BASH_SUBSHELL" -gt 0 ] || printf "error: %s stopped at line %s (exit %s)\n" "${BASH_SOURCE[0]##*/}" "$LINENO" "$rc" >&2' ERR
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 WORK="${GOOGLEBOOK_WORK:-$ROOT/work}"
-# UTM 5.0.6 beta app bundle: supplies QEMU and the epoxy, Vulkan, MoltenVK and ANGLE frameworks.
+# UTM 5.0.6 beta app bundle: supplies the epoxy, Vulkan, MoltenVK, ANGLE and SPICE frameworks and
+# QEMU's firmware folder. (Its own QEMU isn't used: build-gfxstream.sh builds ours.)
 UTM_BETA_APP="${UTM_BETA_APP:-$WORK/UTM-beta/UTM.app}"
-# Mesa source tree: supplies Khronos headers for the host build and is the guest driver source.
-MESA_SRC="${MESA_SRC:-$WORK/src/mesa-26.2.4}"
+# Android's Mesa at the revision the gfxstream host renderer was cut from: the guest's graphics
+# driver (build-gfxstream.sh), and the Khronos and kernel headers the other builds want.
+MESA_GFX_REPO="https://android.googlesource.com/platform/external/mesa3d"
+MESA_GFX_COMMIT="9ac80d5c43c46e85700a75ca34bd1036ee15467e"
+MESA_SRC="$WORK/src/mesa3d-gfxstream"
 EPOXY_REPO="https://github.com/utmapp/libepoxy.git"
 EPOXY_COMMIT="bf98587477fe68d07b93319ece7b40a7d0e2eabe"
 # Build Mac binaries that also run on older macOS, not only the version they were built on.
@@ -41,8 +45,6 @@ apply_patch() { # repo patch
     git -C "$1" apply "$2"
   fi
 }
-MESA_URL="https://archive.mesa3d.org/mesa-26.2.4.tar.xz"
-MESA_SHA256="bce5f7fbebb934373b86c999a064d52fb5065878dc57f287f95346648ec832e9"
 LIBSEPOL_SHA256="79f3d2c88f44b7eb5cf54d9792e03232297e17f97a179163f2750099a00f164d"
 LIBSEPOL_URL="https://github.com/SELinuxProject/selinux/releases/download/3.11/libsepol-3.11.tar.gz"
 # Download once and verify against a pinned checksum.

@@ -40,21 +40,18 @@ python3 scripts/make_mica_gpu_initrd.py >>"$WORK/build-image.log" 2>&1 || { tail
 
 say "Vendor overlay, policy and services"
 python3 scripts/make_mica_security_port.py base --graphics --audio --vm-compat --locksettings --offline-desktop \
-  --quiet-diagnostics --crash-diagnostics --venus --vulkan-desktop --quiet-absent-hardware \
-  --host-control --host-input --bluetooth --camera --gfxstream ${GBOS_IMAGE_FLAGS:-} >>"$WORK/build-image.log" 2>&1 || { tail -30 "$WORK/build-image.log"; die "image assembly failed"; }
+  --quiet-absent-hardware --host-control --host-input --bluetooth --camera ${GBOS_IMAGE_FLAGS:-} >>"$WORK/build-image.log" 2>&1 || { tail -30 "$WORK/build-image.log"; die "image assembly failed"; }
 
-say "User data area and extra kernel modules"
-{ python3 scripts/expand_mica_userdata.py artifacts/mica/base/googlebook.raw \
-  && python3 scripts/add_mica_system_heap.py base base-heap \
-  && python3 scripts/add_mica_virtio_blk.py base-heap base-heap-vblk; } >>"$WORK/build-image.log" 2>&1 \
+say "User data area"
+python3 scripts/expand_mica_userdata.py artifacts/mica/base/googlebook.raw >>"$WORK/build-image.log" 2>&1 \
   || { tail -30 "$WORK/build-image.log"; die "image finishing failed"; }
 
 mkdir -p "$IMAGE_DIR"; chmod 700 "$IMAGE_DIR"
-mv artifacts/mica/base-heap-vblk/googlebook.raw artifacts/mica/base-heap-vblk/initrd.img "$IMAGE_DIR/"
+mv artifacts/mica/base/googlebook.raw artifacts/mica/base/initrd.img "$IMAGE_DIR/"
 # Holds all guest data: keep it private.
 chmod 600 "$IMAGE_DIR/googlebook.raw"
 cp artifacts/mica/normal/kernel.Image "$IMAGE_DIR/kernel.Image"
-cp artifacts/mica/base-heap-vblk/*.json "$IMAGE_DIR/" 2>/dev/null || true
+cp artifacts/mica/base/*.json "$IMAGE_DIR/" 2>/dev/null || true
 cd "$WORK"; rm -rf "$WS"
 say "Image ready: $IMAGE_DIR"
 ls -lh "$IMAGE_DIR" | grep -v json

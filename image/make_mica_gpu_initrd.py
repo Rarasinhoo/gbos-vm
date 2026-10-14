@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Build the VM ramdisk: the original ramdisks, the original signed virtio-pci and virtio-console modules, and the Cuttlefish virtio GPU/input modules."""
+"""Build the VM ramdisk: the original ramdisks, the original signed virtio-pci and virtio-console
+modules, and Cuttlefish's virtio GPU, input and block modules and its DMA-heap module."""
 from pathlib import Path
 import hashlib,json,stat,subprocess
 from cpio_tools import write
 R=Path(__file__).resolve().parents[1];base=R/'artifacts/mica/normal'
 donor=R/'artifacts/cuttlefish-arm17/modules';original=R/'artifacts/mica/transport-modules';original.mkdir(exist_ok=True)
-names=['virtio_pci_legacy_dev.ko','virtio_pci_modern_dev.ko','virtio_pci.ko','virtio_dma_buf.ko','virtio-gpu.ko','virtio_input.ko','virtio_console.ko']
+names=['virtio_pci_legacy_dev.ko','virtio_pci_modern_dev.ko','virtio_pci.ko','virtio_dma_buf.ko','virtio-gpu.ko','virtio_input.ko','virtio_console.ko',
+       'system_heap.ko','virtio_blk.ko']
 e={'lib':(stat.S_IFDIR|0o755,b''),'lib/modules':(stat.S_IFDIR|0o755,b'')};manifest={}
 for n in names:
     if n.startswith('virtio_pci') or n=='virtio_console.ko':
@@ -19,7 +21,9 @@ for n in names:
 for n in ['modules.alias','modules.dep','modules.softdep','modules.options']:
     e['lib/modules/'+n]=(stat.S_IFREG|0o644,(donor/n).read_bytes())
 mode,dep=e['lib/modules/modules.dep']
-if b'/virtio_console.ko:' not in dep:e['lib/modules/modules.dep']=(mode,dep+b'\n/lib/modules/virtio_console.ko:\n')
+for n in ['virtio_console.ko','system_heap.ko','virtio_blk.ko']:
+    if f'/{n}:'.encode() not in dep:dep+=f'\n/lib/modules/{n}:\n'.encode()
+e['lib/modules/modules.dep']=(mode,dep)
 e['lib/modules/modules.load']=(stat.S_IFREG|0o644,('\n'.join(names)+'\n').encode())
 e['lib/modules/modules.load.recovery']=e['lib/modules/modules.load']
 data=(base/'vendor_0_platform.cpio').read_bytes()+(base/'init_ramdisk.cpio').read_bytes()+write(e)

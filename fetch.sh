@@ -1,15 +1,14 @@
 #!/bin/bash
 # Download and verify the things we may not redistribute, on your own machine:
 #   Google's Googlebook recovery image, Google's Cuttlefish virtual-device image, and the UTM 5 beta.
-# Also installs three small Homebrew tools used to read and write the disk image.
+# Needs the Homebrew tools that read and write the disk image (prereqs.sh installs them).
 . "$(dirname "$0")/lib.sh"
 need curl "macOS"; need python3 "Xcode command line tools"; need hdiutil "macOS"
 mkdir -p "$WORK" "$DOWNLOADS"
 
-say "Image tools (Homebrew: erofs-utils, e2fsprogs, lz4, pkgconf)"
 need brew "https://brew.sh"
-for f in erofs-utils e2fsprogs lz4 pkgconf; do
-  brew list --formula "$f" >/dev/null 2>&1 || brew install -q "$f"
+for f in erofs-utils e2fsprogs lz4; do
+  brew list --formula "$f" >/dev/null 2>&1 || die "missing $f; run ./prereqs.sh"
 done
 # Homebrew can't pin versions: note when these differ from the tested ones.
 for fv in erofs-utils:1.9.4 e2fsprogs:1.47.4 lz4:1.10.0; do
@@ -17,7 +16,7 @@ for fv in erofs-utils:1.9.4 e2fsprogs:1.47.4 lz4:1.10.0; do
   [ "${have%%_*}" = "${fv#*:}" ] || echo "note: ${fv%%:*} is ${have:-missing}; tested with ${fv#*:}"
 done
 
-say "UTM 5.0.6 beta (QEMU, MoltenVK, ANGLE, SPICE)"
+say "UTM 5.0.6 beta (MoltenVK, ANGLE, SPICE)"
 if [ ! -d "$UTM_BETA_APP" ]; then
   fetch_big "$UTM_DMG_URL" "$DOWNLOADS/UTM-5.0.6.dmg" "$UTM_DMG_SHA256"
   mnt="$(mktemp -d)"; mounted_here=1
@@ -54,10 +53,13 @@ PY
 )"
   fetch_big "$url" "$DOWNLOADS/$CUTTLEFISH_ZIP" "$CUTTLEFISH_SHA256"
 fi
-if [ ! -f "$WORK/cuttlefish/manifest.json" ] || [ ! -f "$WORK/cuttlefish/bluetooth/android.hardware.bluetooth-service.cuttlefish" ] \
-   || [ ! -f "$WORK/cuttlefish/camera/com.google.emulated.camera.provider.hal.v4l2.apex" ]; then
+# Unpack again whenever the list of what we take from it changes
+UNPACKER_ID="$(shasum -a 256 "$ROOT/tools/unpack_cuttlefish.py" | cut -d' ' -f1)"
+if [ ! -f "$WORK/cuttlefish/manifest.json" ] || [ "$(cat "$WORK/cuttlefish/.unpacker" 2>/dev/null)" != "$UNPACKER_ID" ]; then
+  rm -rf "$WORK/cuttlefish"
   PATH="$(brew --prefix erofs-utils)/bin:$(brew --prefix e2fsprogs)/sbin:$PATH" \
     python3 "$ROOT/tools/unpack_cuttlefish.py" "$DOWNLOADS/$CUTTLEFISH_ZIP" "$WORK/cuttlefish"
+  echo "$UNPACKER_ID" >"$WORK/cuttlefish/.unpacker"
 fi
 
 say "Googlebook recovery image (7.6 GB download, 19 GB unpacked)"

@@ -8,13 +8,10 @@ need git "Xcode command line tools"; need clang "Xcode command line tools"
 need python3 "Homebrew or Xcode"; need pkg-config "brew install pkg-config"
 find_build_python; [ -n "$BUILD_PYTHON" ] || die "meson needs Python 3.10 or newer (Apple's python3 is 3.9): brew install python@3.13"
 FW="$UTM_BETA_APP/Contents/Frameworks"
-[ -d "$FW/qemu-aarch64-softmmu.framework" ] || die "UTM 5 beta not found at $UTM_BETA_APP (set UTM_BETA_APP)"
-if [ ! -d "$MESA_SRC/include/KHR" ]; then
-  say "Mesa source (Khronos headers)"
-  fetch "$MESA_URL" "$WORK/downloads/mesa-26.2.4.tar.xz" "$MESA_SHA256"
-  mkdir -p "$(dirname "$MESA_SRC")"; tar -xf "$WORK/downloads/mesa-26.2.4.tar.xz" -C "$(dirname "$MESA_SRC")"
-fi
+[ -d "$FW/epoxy.0.framework" ] || die "UTM 5 beta not found at $UTM_BETA_APP (set UTM_BETA_APP)"
 mkdir -p "$WORK/src" "$WORK/build" "$WORK/host" "$WORK/pkgconfig"
+say "Mesa source (Khronos and kernel headers; build-gfxstream.sh builds the guest driver from it)"
+checkout "$MESA_GFX_REPO" "$MESA_GFX_COMMIT" "$MESA_SRC"
 
 say "Python build environment (meson, ninja)"
 # Rebuild when the pinned list changes, or an earlier run left it half-installed or on a too-old Python.

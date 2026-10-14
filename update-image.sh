@@ -1,12 +1,17 @@
 #!/bin/bash
-# Rebuild the system part of an existing disk image after pulling new changes, keeping your
-# data. Builds a fresh image next to the old one, copies over only the system area and the
+# Rebuild everything after pulling new changes, and the system part of an existing disk image,
+# keeping your data. Builds a fresh image next to the old one, copies over only the system area and the
 # ramdisk, and keeps the previous disk as googlebook.raw.before-update (a copy-on-write clone).
 . "$(dirname "$0")/lib.sh"
 no_running_vm
 IMAGE_DIR="${GBOS_IMAGE_DIR:-$WORK/image}"
 [ -f "$IMAGE_DIR/googlebook.raw" ] || die "no existing image in $IMAGE_DIR; run ./build-image.sh"
 "$ROOT/fetch.sh"
+# Bring the app, the guest helpers and the graphics stack up to date first (each only rebuilds
+# what changed), so the new image is made from what was just pulled.
+"$ROOT/build-host.sh"
+"$ROOT/build-guest.sh"
+"$ROOT/build-gfxstream.sh"
 # A fresh scratch folder, so nothing that already exists (your image included) is ever removed.
 NEW="$(mktemp -d "$WORK/image-new.XXXXXX")"
 trap 'rm -rf "$NEW"' EXIT
