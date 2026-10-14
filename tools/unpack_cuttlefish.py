@@ -38,10 +38,6 @@ FILES = {
     'graphics/cf-composer/android.hardware.composer.hwc3-service.drm': ('apex:com.android.hardware.graphics.composer.drm_hwcomposer.apex', '/bin/hw/android.hardware.composer.hwc3-service.drm'),
     'graphics/cf-composer/drm_hwcomposer_atom_reporter.so': ('apex:com.android.hardware.graphics.composer.drm_hwcomposer.apex', '/lib64/drm_hwcomposer_atom_reporter.so'),
     'bluetooth/android.hardware.bluetooth-service.cuttlefish': ('apex:com.google.cf.bt.apex', '/bin/hw/android.hardware.bluetooth-service.cuttlefish'),
-    # gfxstream's guest Vulkan driver, for the experimental gfxstream graphics (--gfxstream images)
-    'gfxstream/vulkan.ranchu.so': ('apex:com.google.cf.vulkan.apex', '/lib64/hw/vulkan.ranchu.so'),
-    'gfxstream/libOpenglCodecCommon.so': ('apex:com.google.cf.vulkan.apex', '/lib64/libOpenglCodecCommon.so'),
-    'gfxstream/libzstd.so': ('apex:com.google.cf.vulkan.apex', '/lib64/libzstd.so'),
     'modules/system_heap.ko': ('vendor_dlkm', '/lib/modules/system_heap.ko'),
 }
 RAMDISK_MODULES = ['virtio_pci_legacy_dev.ko', 'virtio_pci_modern_dev.ko', 'virtio_pci.ko',
