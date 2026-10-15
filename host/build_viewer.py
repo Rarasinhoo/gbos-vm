@@ -2,7 +2,7 @@
 """Build the app.  build_viewer.py COCOASPICE_SRC UTM_FRAMEWORKS VIEWER_M OUT_DIR RUN_SCRIPTS_DIR WORK
 Links the SPICE client libraries that ship inside the UTM app (nothing is copied out of it).
 The app can start the VM itself: the runner scripts are bundled and WORK is recorded in Info.plist."""
-import plistlib, shutil, subprocess, sys
+import os, plistlib, shutil, subprocess, sys
 from pathlib import Path
 
 src, frameworks, viewer_m, out, run_scripts, work = [Path(p).resolve() for p in sys.argv[1:7]]
@@ -47,5 +47,7 @@ for n in ('spice-client-glib-2.0.8', 'glib-2.0.0', 'gobject-2.0.0', 'gio-2.0.0',
 cmd += ['-Wl,-rpath,' + str(frameworks), '-Wl,-rpath,@executable_path/../../../../UTM-beta/UTM.app/Contents/Frameworks',
         '-o', str(app / 'MacOS/GooglebookViewer')]
 subprocess.run(cmd, check=True)
-subprocess.run(['codesign', '--force', '--sign', '-', str(app.parent)], check=True, capture_output=True)
+# build-host.sh's local certificate when there is one (a stable identity for macOS's permissions)
+sign = ['--keychain', os.environ['GBOS_SIGN_KEYCHAIN'], '--sign', os.environ['GBOS_SIGN_ID']] if os.environ.get('GBOS_SIGN_ID') else ['--sign', '-']
+subprocess.run(['codesign', '--force', *sign, str(app.parent)], check=True, capture_output=True)
 print(app.parent)
