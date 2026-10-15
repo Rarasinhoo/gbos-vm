@@ -39,9 +39,24 @@ FILES = {
     'graphics/cf-composer/drm_hwcomposer_atom_reporter.so': ('apex:com.android.hardware.graphics.composer.drm_hwcomposer.apex', '/lib64/drm_hwcomposer_atom_reporter.so'),
     'bluetooth/android.hardware.bluetooth-service.cuttlefish': ('apex:com.google.cf.bt.apex', '/bin/hw/android.hardware.bluetooth-service.cuttlefish'),
     'modules/system_heap.ko': ('vendor_dlkm', '/lib/modules/system_heap.ko'),
+    # Makes a network card a Wi-Fi interface, always connected (image/guest_wifi.sh)
+    'modules/virt_wifi.ko': ('vendor_dlkm', '/lib/modules/virt_wifi.ko'),
+    # The generic Wi-Fi HAL, which works with virt_wifi (image/mica_wifi_port.py)
+    'wifi/android.hardware.wifi-service': ('apex:com.android.hardware.wifi.apex', '/bin/hw/android.hardware.wifi-service'),
+    'wifi/lib64/android.hardware.wifi-V4-ndk.so': ('apex:com.android.hardware.wifi.apex', '/lib64/android.hardware.wifi-V4-ndk.so'),
+    'wifi/lib64/android.hardware.wifi.common-V2-ndk.so': ('apex:com.android.hardware.wifi.apex', '/lib64/android.hardware.wifi.common-V2-ndk.so'),
+    'wifi/lib64/libbase.so': ('apex:com.android.hardware.wifi.apex', '/lib64/libbase.so'),
+    'wifi/lib64/libc++.so': ('apex:com.android.hardware.wifi.apex', '/lib64/libc++.so'),
+    'wifi/lib64/libcutils.so': ('apex:com.android.hardware.wifi.apex', '/lib64/libcutils.so'),
+    'wifi/lib64/libnl.so': ('apex:com.android.hardware.wifi.apex', '/lib64/libnl.so'),
+    'wifi/lib64/libutils.so': ('apex:com.android.hardware.wifi.apex', '/lib64/libutils.so'),
+    'wifi/lib64/libwifi-hal.so': ('apex:com.android.hardware.wifi.apex', '/lib64/libwifi-hal.so'),
+    'wifi/lib64/libwifi-system-iface.so': ('apex:com.android.hardware.wifi.apex', '/lib64/libwifi-system-iface.so'),
+    'wifi/lib64/libxml2.so': ('apex:com.android.hardware.wifi.apex', '/lib64/libxml2.so'),
 }
 RAMDISK_MODULES = ['virtio_pci_legacy_dev.ko', 'virtio_pci_modern_dev.ko', 'virtio_pci.ko',
-                   'virtio_dma_buf.ko', 'virtio-gpu.ko', 'virtio_input.ko', 'virtio_blk.ko']
+                   'virtio_dma_buf.ko', 'virtio-gpu.ko', 'virtio_input.ko', 'virtio_blk.ko',
+                   'rfkill.ko', 'cfg80211.ko']
 
 
 def sha256_file(path):

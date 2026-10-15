@@ -31,6 +31,13 @@ if [ "$(settings get global device_provisioned)" != 1 ]; then
     pm disable-user --user "$vm_user" com.google.android.desktop.setupwizard
 fi
 svc power stayon true
+# Wi-Fi on: with virt_wifi (vm-wifi), the network card is Android's Wi-Fi
+# and join the one network virt_wifi offers (its traffic goes out the card, so this is the real network)
+if [ -e /sys/class/net/wlan0 ]; then
+    timeout 10 cmd wifi set-wifi-enabled enabled
+    for i in 1 2 3 4 5 6 7 8 9 10; do timeout 5 cmd wifi status 2>/dev/null | grep -q 'Wifi is enabled' && break; sleep 2; done
+    timeout 15 cmd wifi connect-network VirtWifi open 2>&1 | head -2 | sed 's/^/VM_WIFI /'
+fi
 # The Mac decides when this machine sleeps. Android must not: with the Mac's battery showing
 # (unplugged), it would turn the screen off after its timeout and suspend, and nothing from the
 # viewer can wake a suspended VM, so the window stays black.

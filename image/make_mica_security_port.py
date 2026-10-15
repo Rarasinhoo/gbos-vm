@@ -92,12 +92,27 @@ on post-fs-data
 extra_dirs,new_dirs=[],['lib64/vm_keymint']
 from mica_bluetooth_port import apply as bluetooth
 old,new=bluetooth(add,original,files);extra_dirs+=old;new_dirs+=new
+from mica_wifi_port import apply as wifi
+new_dirs+=wifi(add)
 # The VM has no TPM or Trusty. Left alone, init restarts these services (and dumps a
 # tombstone) every 5 seconds. Disable them before they first start. (A stop-on-restart
 # trigger does not work for the TPM daemon: a vendor script cannot watch its init.svc property.)
 add('etc/init/vm-absent-hardware.rc',b'''on early-init
     stop android.system.desktop.security.gscd
     stop vendor.secretkeeper.trusty
+''','vendor_configs_file')
+# Wi-Fi on the network card (see guest_wifi.sh). Root in the shell domain, which the policy
+# lets set up network interfaces (tools-src/guest_graphics_memfd_policy.c).
+add('bin/vm-wifi.sh',(R/'scripts/guest_wifi.sh').read_bytes(),'vendor_shell_exec',0o755)
+add('etc/init/vm-wifi.rc',b'''service vm-wifi /system/bin/sh /vendor/bin/vm-wifi.sh
+    oneshot
+    user root
+    group root
+    capabilities NET_ADMIN
+    seclabel u:r:shell:s0
+    console ttyAMA0
+on post-fs-data
+    start vm-wifi
 ''','vendor_configs_file')
 # A lid switch, always open: without one, Android thinks the lid is shut (see guest_lid.sh).
 add('bin/vm-lid.sh',(R/'scripts/guest_lid.sh').read_bytes(),'vendor_shell_exec',0o755)

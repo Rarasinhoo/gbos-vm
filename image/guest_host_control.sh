@@ -45,6 +45,13 @@ handle() {
       t=${line#VM_TAP }; x=${t%% *}; y=${t#* }
       case "$x$y" in *[!0-9]*) return ;; esac
       timeout 5 input tap "$x" "$y"; echo "VM_CONTROL tapped $x $y" ;;
+    VM_WIFILOG)
+      # Wi-Fi: what the framework, its HAL, wificond and wpa_supplicant logged, in order
+      timeout 5 cmd wifi set-wifi-enabled enabled 2>&1 | sed 's/^/VM_CONTROL wifilog enable: /'
+      timeout 8 cmd wifi list-scan-results 2>&1 | head -6 | cut -c1-140 | sed 's/^/VM_CONTROL wifilog scan: /'
+      sleep 8
+      timeout 10 logcat -d -b main,system,crash,events -t 60000 2>/dev/null | grep -E 'Wifi|wifi|wlan|HalDevMgr|wificond|ActiveModeWarden|Supplicant|supplicant|ClientMode|nl80211|cfg80211|DEBUG|libc |avc.*(hal_wifi|wificond|wpa)' | grep -v -E 'NetworkFactory|FastPrintWriter|PackageInfo|SystemServerTiming|MagicTether|LastMileLogger|HwNoService' | tail -150 | cut -c7-240 | sed 's/^/VM_CONTROL wifilog /'
+      ls -l /sys/class/net/wlan0/ 2>&1 | grep -E 'phy80211|wireless' | sed 's/^/VM_CONTROL wifilog sysfs /' ;;
     VM_NEARBY)
       # Quick Share and Nearby: what they log about discovery, Bluetooth and Wi-Fi
       timeout 10 logcat -d -b main,system -t 60000 2>/dev/null | grep -i -E 'nearby|quickshare|sharing|fastpair|mdns|nsd|medium|bluetoothle|BtGatt|suspend|bt_|bluetooth|scanmanager|scanner|l2cap|wifilan' | grep -v -i -E 'instantOnLost|instant on lost|AdvertiseSuspend|Suspending!|clearcut|RateLimit|bluetooth-cf|certificate' | tail -400 | cut -c1-230 | sed 's/^/VM_CONTROL nearby /' ;;
@@ -56,6 +63,17 @@ handle() {
       echo "VM_CONTROL boot=$(getprop sys.boot_completed) user=$(timeout 5 am get-current-user) size=$(timeout 5 wm size | tr '\n' ' ') density=$(timeout 5 wm density | tr '\n' ' ')"
       timeout 5 cat /proc/asound/cards 2>&1 | sed 's/^/VM_CONTROL asound /'
       timeout 5 cmd device_state state 2>&1 | head -3 | sed 's/^/VM_CONTROL device_state /'
+      ip -br link 2>&1 | head -8 | sed 's/^/VM_CONTROL link /'
+      ip -4 -br addr 2>&1 | head -6 | sed 's/^/VM_CONTROL addr /'
+      grep -E '^(cfg80211|mac80211|virt_wifi|wlan) ' /proc/modules | cut -d' ' -f1,3 | sed 's/^/VM_CONTROL module /'
+      getprop | grep -i -E 'init.svc.*(wifi|wpa|supplicant|hostapd|wlan)' | head -8 | sed 's/^/VM_CONTROL wifi_svc /'
+      getprop | grep -i -E 'wifi_hal|wpa_supplicant|wifi.interface|wlan.driver|vendor.wlan' | head -8 | sed 's/^/VM_CONTROL wifi_prop /'
+      timeout 10 cmd wifi set-wifi-enabled enabled 2>&1 | head -3 | sed 's/^/VM_CONTROL wifi_enable /'
+      sleep 3
+      timeout 8 cmd wifi status 2>&1 | head -8 | cut -c1-160 | sed 's/^/VM_CONTROL wifi /'
+      timeout 8 dumpsys wifi 2>/dev/null | grep -m8 -i -E 'Wi-Fi is|mWifiState|isWifiEnabled|HalDevice|supplicant|Iface' | cut -c1-160 | sed 's/^/VM_CONTROL wifi_dump /'
+      timeout 8 logcat -d -b main,system -t 30000 2>/dev/null | grep -E 'Wifi|wifi|HalDevMgr|wificond|ActiveModeWarden|SupplicantSta|ClientModeImpl|servicemanager.*[Ww]ifi|cfg80211|nl80211' | tail -40 | cut -c19-230 | sed 's/^/VM_CONTROL wifilog /'
+      timeout 5 pm list features 2>/dev/null | grep -i wifi | sed 's/^/VM_CONTROL wifi_feature /'
       timeout 5 cmd device_state print-states 2>&1 | head -12 | sed 's/^/VM_CONTROL device_states /'
       timeout 6 dumpsys input 2>/dev/null | grep -i -m6 -E 'lid|SW_|switch' | cut -c1-160 | sed 's/^/VM_CONTROL lid /'
       echo "VM_CONTROL bluetooth feature=$(timeout 5 pm list features 2>/dev/null | grep -c 'hardware.bluetooth$') on=$(timeout 5 settings get global bluetooth_on) hal=$(getprop init.svc.vendor.bluetooth-aidl-qti) gscd=$(getprop init.svc.android.system.desktop.security.gscd)"

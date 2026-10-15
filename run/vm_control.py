@@ -9,7 +9,7 @@ from pathlib import Path
 _cwd_lock = threading.Lock()  # the working directory is process-wide
 # What the guest's control service accepts (image/guest_host_control.sh), besides VM_TOKEN and
 # VM_DENSITY NNN and VM_TAP X Y; the rest are for testing and diagnosis (they print into serial.log).
-VERBS = ('VM_POWEROFF', 'VM_STATUS', 'VM_LOG', 'VM_TOP', 'VM_NEARBY', 'VM_QUICKSHARE', 'VM_UI')
+VERBS = ('VM_POWEROFF', 'VM_STATUS', 'VM_LOG', 'VM_TOP', 'VM_NEARBY', 'VM_QUICKSHARE', 'VM_UI', 'VM_WIFILOG')
 
 
 def send(run_dir, verb):
