@@ -251,6 +251,7 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) id<NSObject> activity;
 @property(nonatomic) CFMachPortRef swipeTap;
 @property(nonatomic,strong) NSString *runDir;
+@property(nonatomic,strong) NSString *workDir;
 @property(nonatomic) BOOL quitting;
 @property(nonatomic) BOOL restarting;
 @property(nonatomic) BOOL densitySent;
@@ -406,6 +407,11 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  if(!e&&[[NSFileManager defaultManager] fileExistsAtPath:[beside stringByAppendingPathComponent:@"image/googlebook.raw"]])work=beside;
  if(!work||!runner||![[NSFileManager defaultManager] fileExistsAtPath:[work stringByAppendingPathComponent:@"image/googlebook.raw"]]){
   [self fail:[NSString stringWithFormat:@"No VM image at %@/image. Run install.sh first, or rebuild the app if you moved the folder.",work?:@"(unknown)"]];return;}
+ self.workDir=work;
+ // A storage size chosen in Settings: done here, between Android shutting down and starting again
+ NSInteger gib=[d integerForKey:@"PendingStorageGiB"];
+ if(gib>0){[d removeObjectForKey:@"PendingStorageGiB"];NSString *out=[self storage:@[@(gib).stringValue]];
+  if(!out){NSAlert *a=[NSAlert new];a.messageText=@"Couldn't change Android's storage";a.informativeText=@"Android keeps its storage as it was.";[a runModal];}}
  NSString *res=[[d objectForKey:@"Resolution"] description];
  if(![res containsString:@"x"]){
   // "Match this Mac's display": the panel's native pixels, not the (possibly larger) scaled
@@ -497,6 +503,28 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
     [c launchAndReturnError:nil];});
   }
  }];
+}
+// run/storage.py: Android's storage size, or a fresh one of a new size. Its output, or nil if it failed.
+- (NSString *)storage:(NSArray<NSString *> *)args {
+ NSString *script=[NSBundle.mainBundle pathForResource:@"storage" ofType:@"py"];if(!script||!self.workDir)return nil;
+ NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];t.arguments=[@[@"-I",script,self.workDir] arrayByAddingObjectsFromArray:args];
+ NSPipe *p=[NSPipe pipe];t.standardOutput=p;t.standardError=[NSFileHandle fileHandleWithNullDevice];
+ if(![t launchAndReturnError:nil])return nil;
+ NSData *o=[p.fileHandleForReading readDataToEndOfFile];[t waitUntilExit];
+ return t.terminationStatus==0?[[NSString alloc] initWithData:o encoding:NSUTF8StringEncoding]:nil;
+}
+- (void)changeStorage:(id)sender {
+ NSInteger now=[[self storage:@[]] integerValue];
+ NSAlert *a=[NSAlert new];a.messageText=@"Erase Android and change its storage?";
+ a.informativeText=[NSString stringWithFormat:@"Android's storage is %ld GB. Android can't grow it in place, so it starts over with an empty one of the new size, as after a factory reset: its apps, accounts and files are erased. The Mac only uses the space Android fills. The VM restarts now.\n\nNew size in GB (16 to 1024):",(long)now];
+ NSTextField *field=[NSTextField textFieldWithString:@(MAX(64,now*2)).stringValue];field.frame=NSMakeRect(0,0,120,24);a.accessoryView=field;
+ [a addButtonWithTitle:@"Erase and Restart"];[a addButtonWithTitle:@"Cancel"];a.alertStyle=NSAlertStyleCritical;
+ [a.window setInitialFirstResponder:field];
+ if([a runModal]!=NSAlertFirstButtonReturn)return;
+ NSInteger gib=field.integerValue;
+ if(gib<16||gib>1024){NSAlert *b=[NSAlert new];b.messageText=@"Choose a size from 16 to 1024 GB.";[b runModal];return;}
+ [[NSUserDefaults standardUserDefaults] setInteger:gib forKey:@"PendingStorageGiB"];
+ [self.settingsWindow close];[self restartVM:nil];
 }
 - (void)restartVM:(id)sender {if(self.vmTask){self.restarting=YES;[NSApp terminate:nil];}}
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
@@ -650,6 +678,7 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
    @[[NSGridCell emptyContentView],[self checkbox:@"StartFullscreen" title:@"Start in full screen"]],
    @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],
    @[label(@"Processor cores:"),[self popup:@"CPUs" titles:@[@"4",@"6",@"8"] values:@[@4,@6,@8]]],
+   @[label(@"Android storage:"),[NSStackView stackViewWithViews:@[[NSTextField labelWithString:[NSString stringWithFormat:@"%ld GB",(long)[[self storage:@[]] integerValue]]],[NSButton buttonWithTitle:@"Change…" target:self action:@selector(changeStorage:)]]]],
    @[label(@"Network:"),[self popup:@"Network" titles:@[@"Through this Mac",@"On this Mac's network (phones nearby can find it)"] values:@[@"full",@"lan"]]],
    @[[NSGridCell emptyContentView],note],
    @[[NSGridCell emptyContentView],[NSButton buttonWithTitle:@"Restart VM Now" target:self action:@selector(restartVM:)]],
@@ -657,7 +686,7 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
    @[label(@"Trackpad:"),[self checkbox:@"MacSwipes" title:@"Three- and four-finger swipes go to Android, not Mission Control or Spaces,\nwhile the pointer is over Android (needs Accessibility permission)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
-  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,360) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,400) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
   w.title=@"Googlebook Settings";w.releasedWhenClosed=NO;[w.contentView addSubview:grid];
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;

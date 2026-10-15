@@ -29,7 +29,9 @@ def gpt(path):
 def main():
     old, new = sys.argv[1:3]
     a, b = gpt(old), gpt(new)
-    if a != b: sys.exit('the two images have different partition tables; build a fresh image instead')
+    # Android's storage may have been resized (run/storage.py); everything else must match
+    if {k: v for k, v in a.items() if k != 'userdata'} != {k: v for k, v in b.items() if k != 'userdata'} or a['userdata'][0] != b['userdata'][0]:
+        sys.exit('the two images have different partition tables; build a fresh image instead')
     start, end = a['super']; changed = 0
     with open(old, 'r+b') as dst, open(new, 'rb') as src:
         for pos in range(start, end, BLOCK):

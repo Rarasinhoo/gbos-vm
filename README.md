@@ -56,6 +56,8 @@ Android shows your Mac's battery: its level, and whether it is charging (a VM ha
 
 Resolution defaults to your display's native pixels at 16:10, and Android's UI is sized the way macOS sizes its own (density 320 at native resolution on a Retina screen, macOS's 2x). On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel. Settings also offers 1080p, 1440p, 4K and 3440 × 1440 ultrawide.
 
+**Android storage** starts at 16 GB, which Android with Google's apps fills quickly. **Change…** next to it in Settings gives Android a bigger one (16 to 1024 GB; `run/storage.py` does it from a shell). Android encrypts its storage, so it can't grow in place: it starts over empty, as after a factory reset, and the VM restarts. The disk file is sparse, so the Mac only uses the space Android fills; the previous disk is kept as `googlebook.raw.before-update` until the next update.
+
 **Clipboard.** `⌘V` pastes the Mac clipboard into the guest, and that is the only time it is sent. Text copied in Android goes to the Mac clipboard.
 
 **Network** (Settings) is *Through this Mac* by default: Android reaches the internet through the Mac, and your Mac's `127.0.0.1` at `10.0.2.2`. *On this Mac's network* puts Android on your real network as one more device, so your phone can find it (Quick Share, Better Together). It needs a small root service, which the app installs the first time you choose it (macOS asks for your password); it follows the Mac between networks (`sudo run/lan-setup.sh --remove` uninstalls it). Wi-Fi that keeps devices apart (some office and hotel networks) blocks it. `run/run_vm.py` also has `--isolated` (no internet or Mac services, only the pointer and clipboard link) and `--offline` (no network at all).
