@@ -2,6 +2,8 @@
 #import <MetalKit/MetalKit.h>
 #import <IOKit/ps/IOPowerSources.h>
 #import <IOKit/ps/IOPSKeys.h>
+#import <ImageIO/ImageIO.h>
+#import <notify.h>
 #import "CocoaSpice.h"
 #import "CSDisplay+Protected.h"
 #import "CSMetalRenderer.h"
@@ -378,7 +380,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  self.renderer=[[CSMetalRenderer alloc] initWithMetalKitView:self.view];self.view.delegate=self.renderer;
  self.window.contentView=self.view;[self.window center];[self.window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];
  if(self.startFullscreen)[self.window toggleFullScreen:nil];
- __weak App *weakSelf=self;self.view.sendLine=^(NSString *l){[weakSelf ctlSend:l];};[self startControlServer];[self watchBattery];[self watchOtherWindows];[self watchKeyboardLayout];
+ __weak App *weakSelf=self;self.view.sendLine=^(NSString *l){[weakSelf ctlSend:l];};[self startControlServer];[self watchBattery];[self watchOtherWindows];[self watchKeyboardLayout];[self watchScreenshotRequests];
  [CSMain.sharedInstance spiceSetDebug:NO];
  if(![CSMain.sharedInstance spiceStart]){fprintf(stderr,"SPICE worker failed\n");[NSApp terminate:nil];return;}
  if(self.socketPath)[self connectSpice];else [self startVM];
@@ -539,6 +541,47 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
     [c launchAndReturnError:nil];});
   }
  }];
+}
+// --- Screenshots ---------------------------------------------------------------------------------
+// Android's screen as it is, at its full resolution, without the window around it: ⌃⌘S saves it to
+// the Desktop. The frame is a GPU texture (frames never pass through the CPU), so it is copied
+// out once for the file.
+- (BOOL)saveScreenshotTo:(NSString *)path {
+ id<MTLTexture> tex=self.display.texture;if(!tex||tex.width==0)return NO;
+ NSUInteger w=tex.width,h=tex.height,row=w*4;
+ id<MTLBuffer> buf=[tex.device newBufferWithLength:row*h options:MTLResourceStorageModeShared];
+ id<MTLCommandQueue> q=[tex.device newCommandQueue];id<MTLCommandBuffer> cb=[q commandBuffer];id<MTLBlitCommandEncoder> bl=[cb blitCommandEncoder];
+ [bl copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,h,1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row*h];
+ [bl endEncoding];[cb commit];[cb waitUntilCompleted];
+ BOOL rgba=tex.pixelFormat==MTLPixelFormatRGBA8Unorm||tex.pixelFormat==MTLPixelFormatRGBA8Unorm_sRGB;
+ CGColorSpaceRef cs=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+ CGContextRef ctx=CGBitmapContextCreate(NULL,w,h,8,row,cs,(rgba?kCGBitmapByteOrder32Big:kCGBitmapByteOrder32Little)|kCGImageAlphaNoneSkipLast*rgba|kCGImageAlphaNoneSkipFirst*!rgba);
+ if(!ctx){CGColorSpaceRelease(cs);return NO;}
+ // Rows top first, as the file wants them (flipped when the source is drawn upside down)
+ uint8_t *dst=CGBitmapContextGetData(ctx);const uint8_t *src=buf.contents;size_t drow=CGBitmapContextGetBytesPerRow(ctx);
+ for(NSUInteger y=0;y<h;y++)memcpy(dst+y*drow,src+(self.display.isInverted?h-1-y:y)*row,row);
+ CGImageRef img=CGBitmapContextCreateImage(ctx);CGContextRelease(ctx);CGColorSpaceRelease(cs);
+ CGImageDestinationRef d=CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path],CFSTR("public.png"),1,NULL);
+ BOOL ok=NO;if(d){CGImageDestinationAddImage(d,img,NULL);ok=CGImageDestinationFinalize(d);CFRelease(d);}
+ CGImageRelease(img);return ok;
+}
+- (void)takeScreenshot:(id)sender {
+ NSDateFormatter *f=[NSDateFormatter new];f.dateFormat=@"yyyy-MM-dd 'at' HH.mm.ss";
+ NSString *desk=NSSearchPathForDirectoriesInDomains(NSDesktopDirectory,NSUserDomainMask,YES).firstObject;
+ NSString *path=[desk stringByAppendingPathComponent:[NSString stringWithFormat:@"Googlebook Screenshot %@.png",[f stringFromDate:[NSDate date]]]];
+ if(![self saveScreenshotTo:path]){NSBeep();return;}
+ [[NSSound soundNamed:@"Pop"] play];
+ NSString *was=self.window.subtitle;self.window.subtitle=@"Screenshot saved to the Desktop";
+ dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{if([self.window.subtitle isEqualToString:@"Screenshot saved to the Desktop"])self.window.subtitle=was;});
+}
+// For scripted captures (the README's pictures): `notifyutil -p local.googlebook.screenshot` saves
+// one into this run's log folder, which only this user can read.
+- (void)watchScreenshotRequests {
+ int token;__weak App *weak=self;
+ notify_register_dispatch("local.googlebook.screenshot",&token,dispatch_get_main_queue(),^(int t){
+  App *me=weak;if(!me.runDir)return;
+  NSDateFormatter *f=[NSDateFormatter new];f.dateFormat=@"HHmmss";
+  [me saveScreenshotTo:[me.runDir stringByAppendingPathComponent:[NSString stringWithFormat:@"screenshot-%@.png",[f stringFromDate:[NSDate date]]]]];});
 }
 // --- Setup (the downloadable app) ---------------------------------------------------------------
 // One window for people who have never used a terminal: what will happen, then a progress bar
@@ -709,7 +752,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
  self.view.absolute=self.ctlFd>=0;
  [self updateSubtitle];
 }
-- (BOOL)validateMenuItem:(NSMenuItem *)item{if(item.action==@selector(restartVM:))return self.vmTask!=nil;return YES;}
+- (BOOL)validateMenuItem:(NSMenuItem *)item{if(item.action==@selector(restartVM:))return self.vmTask!=nil;if(item.action==@selector(takeScreenshot:))return self.display.texture!=nil;return YES;}
 
 // Settings window. Pointer mode applies immediately; the rest are read by the launcher the
 // next time the VM starts (they are QEMU options), which the window says.
@@ -991,6 +1034,7 @@ int main(int argc,char **argv){@autoreleasepool {
  [appMenu addItemWithTitle:@"Settings…" action:@selector(showSettings:) keyEquivalent:@","];
  [appMenu addItem:[NSMenuItem separatorItem]];
  NSMenuItem *rs=[appMenu addItemWithTitle:@"Restart VM" action:@selector(restartVM:) keyEquivalent:@"r"];rs.keyEquivalentModifierMask=NSEventModifierFlagControl|NSEventModifierFlagCommand;
+ NSMenuItem *ss=[appMenu addItemWithTitle:@"Take Screenshot" action:@selector(takeScreenshot:) keyEquivalent:@"s"];ss.keyEquivalentModifierMask=NSEventModifierFlagControl|NSEventModifierFlagCommand;
  [appMenu addItemWithTitle:@"Shut Down and Quit" action:@selector(terminate:) keyEquivalent:@"q"];
  NSMenu *editMenu=add(@"Edit");
  [editMenu addItemWithTitle:@"Paste into Guest" action:@selector(pasteIntoGuest:) keyEquivalent:@"v"];
