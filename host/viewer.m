@@ -13,6 +13,7 @@
 #import <netinet/tcp.h>
 #import <arpa/inet.h>
 #import <CommonCrypto/CommonHMAC.h>
+#import <ApplicationServices/ApplicationServices.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/sysctl.h>
@@ -185,6 +186,13 @@ static unsigned short scan[128] = {
  for(NSTouch *t in touches){NSNumber *n=self.touchIds[t.identity]?:@(self.nextTouchId++ & 0xffff);seen[t.identity]=n;
   [contacts addObject:@[n,@(t.normalizedPosition.x),@(1-t.normalizedPosition.y)]];}
  self.touchIds=seen;
+ // Two fingers that just started moving: put them down where they landed first, so Android
+ // scrolls the whole way they went, not from where they were told apart from a tap.
+ if(!self.padContacts.count&&touches.count==2&&self.twoFingerStart.count==2){
+  NSMutableArray *start=[NSMutableArray array];
+  for(NSTouch *t in touches){NSValue *v=self.twoFingerStart[t.identity];if(!v){start=nil;break;}
+   [start addObject:@[seen[t.identity],@(v.pointValue.x),@(1-v.pointValue.y)]];}
+  if(start)[self sendPadContacts:start];}
  [self sendPadContacts:contacts];
 }
 // The trackpad goes to the guest's touchpad only once it exists and while Settings allow it.
@@ -241,6 +249,7 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) NSTask *vmTask;
 @property(nonatomic,strong) dispatch_source_t glide, touchTest, wheelTest;
 @property(nonatomic,strong) id<NSObject> activity;
+@property(nonatomic) CFMachPortRef swipeTap;
 @property(nonatomic,strong) NSString *runDir;
 @property(nonatomic) BOOL quitting;
 @property(nonatomic) BOOL restarting;
@@ -598,7 +607,36 @@ static int bridgeVersion(NSString *path) {
 }
 - (void)checkChanged:(NSButton *)sender {
  [[NSUserDefaults standardUserDefaults] setBool:sender.state==NSControlStateValueOn forKey:sender.identifier];
+ if([sender.identifier isEqualToString:@"MacSwipes"]){
+  // The first time, macOS asks for the Accessibility permission; the swipes follow once it's given.
+  if(sender.state==NSControlStateValueOn&&!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)@{(__bridge NSString *)kAXTrustedCheckOptionPrompt:@YES})){
+   __block int tries=0;dispatch_source_t t=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+   dispatch_source_set_timer(t,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),2*NSEC_PER_SEC,NSEC_PER_SEC/4);
+   dispatch_source_set_event_handler(t,^{if(AXIsProcessTrusted()||++tries>150){dispatch_source_cancel(t);[self updateSwipeTap];}});
+   dispatch_resume(t);}
+  [self updateSwipeTap];}
 }
+// Mac trackpad swipes with three or four fingers (Mission Control, Spaces, App Exposé) reach the Dock
+// as their own events (type 30), apart from the touches this window gets. While the app is in
+// front and the pointer is over Android, an event tap holds them back, so the swipe is Android's
+// alone. Only those events: everything else passes untouched.
+static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef event,void *info){
+ App *app=(__bridge App *)info;
+ if(type==kCGEventTapDisabledByTimeout||type==kCGEventTapDisabledByUserInput){if(app.swipeTap)CGEventTapEnable(app.swipeTap,true);return event;}
+ VMView *v=app.view;
+ if(type==30&&v.inside&&v.absolute&&!v.locked&&[v padActive])return NULL;
+ return event;
+}
+- (void)updateSwipeTap {
+ BOOL want=[[NSUserDefaults standardUserDefaults] boolForKey:@"MacSwipes"]&&NSApp.isActive&&AXIsProcessTrusted();
+ if(want&&!self.swipeTap){
+  self.swipeTap=CGEventTapCreate(kCGSessionEventTap,kCGHeadInsertEventTap,kCGEventTapOptionDefault,CGEventMaskBit(30),swipeTapped,(__bridge void *)self);
+  if(!self.swipeTap)return;
+  CFRunLoopSourceRef src=CFMachPortCreateRunLoopSource(NULL,self.swipeTap,0);CFRunLoopAddSource(CFRunLoopGetMain(),src,kCFRunLoopCommonModes);CFRelease(src);
+ }else if(!want&&self.swipeTap){CGEventTapEnable(self.swipeTap,false);CFMachPortInvalidate(self.swipeTap);CFRelease(self.swipeTap);self.swipeTap=NULL;}
+}
+- (void)applicationDidBecomeActive:(NSNotification *)n {[self updateSwipeTap];}
+- (void)applicationDidResignActive:(NSNotification *)n {[self updateSwipeTap];}
 - (void)showSettings:(id)sender {
  if(!self.settingsWindow){
   NSTextField *(^label)(NSString *)=^NSTextField *(NSString *t){NSTextField *l=[NSTextField labelWithString:t];l.alignment=NSTextAlignmentRight;return l;};
@@ -606,6 +644,7 @@ static int bridgeVersion(NSString *path) {
   NSTextField *note=[self hint:@"Everything below applies the next time you start the VM."];
   NSGridView *grid=[NSGridView gridViewWithViews:@[
    @[[NSGridCell emptyContentView],hint],
+   @[label(@"Trackpad:"),[self checkbox:@"MacSwipes" title:@"Three- and four-finger swipes go to Android, not Mission Control or Spaces,\nwhile the pointer is over Android (needs Accessibility permission)"]],
    @[label(@"Clipboard:"),[self checkbox:@"GuestClipboardToMac" title:@"Copy text copied in Android to the Mac clipboard"]],
    @[[NSGridCell emptyContentView],note],
    @[[NSGridCell emptyContentView],[NSButton buttonWithTitle:@"Restart VM Now" target:self action:@selector(restartVM:)]],
@@ -621,7 +660,7 @@ static int bridgeVersion(NSString *path) {
    @[[NSGridCell emptyContentView],[self checkbox:@"BluetoothPhones" title:@"… Android phones too (yours, for Quick Share and Better Together; also others nearby)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
-  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,470) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,520) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
   w.title=@"Googlebook Settings";w.releasedWhenClosed=NO;[w.contentView addSubview:grid];
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;

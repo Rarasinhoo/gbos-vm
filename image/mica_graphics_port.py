@@ -40,7 +40,14 @@ service vendor.graphics.allocator /vendor/bin/hw/android.hardware.graphics.alloc
  props={'ro.hardware.egl':'angle','ro.hardware.vulkan':'ranchu','ro.hardware.gralloc':'minigbm','ro.hwui.use_vulkan':'true',
         'debug.renderengine.backend':'skiavkthreaded','debug.renderengine.vulkan':'true','debug.renderengine.graphite_desktop_optin':'false',
         'debug.hwui.renderer':'skiavk','ro.vendor.hwcomposer.mode':'client',
-        'ro.surface_flinger.has_wide_color_display':'false','ro.surface_flinger.has_HDR_display':'false','ro.vendor.hwc.drop_drm_master':'0'}
+        'ro.surface_flinger.has_wide_color_display':'false','ro.surface_flinger.has_HDR_display':'false','ro.vendor.hwc.drop_drm_master':'0',
+        # SurfaceFlinger's frame budget. Unset, it takes the laptop panel's 60 Hz numbers: it starts each
+        # frame 15.7 ms ahead, two whole refreshes at 120 Hz, so the pointer (which moves through
+        # SurfaceFlinger alone) trails by one refresh more than it needs. 7.5 ms: within one refresh
+        # at 120 Hz, half of one at 60. Apps keep their two refreshes to draw.
+        'debug.sf.use_phase_offsets_as_durations':'1',   # (it reads the durations below only with this)
+        **{f'debug.sf.{k}.sf.duration':'7500000' for k in ('late','early','earlyGl')},
+        **{f'debug.sf.{k}.app.duration':'16666666' for k in ('late','early','earlyGl')}}
  b,label,mode=files['build.prop']  # keeps what the caller already added (no StrongBox, say)
  lines=[l for l in b.decode().splitlines() if l.split('=',1)[0] not in props]
  lines+=['# The VM graphics stack: gfxstream, ANGLE and the virtual buffer allocator.']+[k+'='+v for k,v in props.items()]

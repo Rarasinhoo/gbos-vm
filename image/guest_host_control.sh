@@ -45,6 +45,10 @@ handle() {
       t=${line#VM_TAP }; x=${t%% *}; y=${t#* }
       case "$x$y" in *[!0-9]*) return ;; esac
       timeout 5 input tap "$x" "$y"; echo "VM_CONTROL tapped $x $y" ;;
+    VM_SF)
+      # How SurfaceFlinger paces frames (pointer latency): its settings and its vsync timing
+      getprop | grep -E 'surface_flinger|debug\.sf|hwc|composer' | cut -c1-160 | sed 's/^/VM_CONTROL sf prop /'
+      timeout 8 dumpsys SurfaceFlinger 2>/dev/null | grep -i -E 'duration|missed|jank|composition time|frame time' | grep -v -E 'Connection|^ *\{id=' | head -40 | cut -c1-200 | sed 's/^/VM_CONTROL sf /' ;;
     VM_WIFILOG)
       # Wi-Fi: what the framework, its HAL, wificond and wpa_supplicant logged, in order
       timeout 5 cmd wifi set-wifi-enabled enabled 2>&1 | sed 's/^/VM_CONTROL wifilog enable: /'
