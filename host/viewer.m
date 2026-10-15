@@ -31,6 +31,7 @@ static unsigned short scan[128] = {
 };
 @interface VMView : MTKView
 - (void)setHostCursorHidden:(BOOL)hidden;
+- (void)refreshHostCursor;
 - (void)moveBy:(CGPoint)points;
 - (void)sendPadContacts:(NSArray<NSArray<NSNumber *> *> *)contacts;
 - (BOOL)padActive;
@@ -43,7 +44,7 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) CSInput *input;
 @property(nonatomic) BOOL captured;
 @property(nonatomic) BOOL inside;
-@property(nonatomic) BOOL cursorHidden;
+@property(nonatomic) BOOL cursorHidden, cursorWanted;
 @property(nonatomic) CSInputButton buttons;
 @property(nonatomic) CGSize guestSize;
 @property(nonatomic) CGPoint carry;     // captured mouse: motion not sent yet, under one guest pixel
@@ -73,7 +74,12 @@ static unsigned short scan[128] = {
  self.tracking=[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited|NSTrackingMouseMoved|NSTrackingActiveInKeyWindow|NSTrackingInVisibleRect owner:self userInfo:nil];
  [self addTrackingArea:self.tracking];
 }
-- (void)setHostCursorHidden:(BOOL)hidden {
+// Hiding the Mac cursor holds for the whole screen while this app is active, so it stays hidden
+// only while this window has the focus: a macOS prompt, a password dialog or a sheet in front
+// gets the cursor back (the window stops hearing about the mouse once it isn't key).
+- (void)setHostCursorHidden:(BOOL)hidden {self.cursorWanted=hidden;[self refreshHostCursor];}
+- (void)refreshHostCursor {
+ BOOL hidden=self.cursorWanted&&self.window.isKeyWindow&&NSApp.isActive;
  if(hidden==self.cursorHidden)return;
  self.cursorHidden=hidden;if(hidden)[NSCursor hide];else [NSCursor unhide];
 }
@@ -338,7 +344,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  self.renderer=[[CSMetalRenderer alloc] initWithMetalKitView:self.view];self.view.delegate=self.renderer;
  self.window.contentView=self.view;[self.window center];[self.window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];
  if(self.startFullscreen)[self.window toggleFullScreen:nil];
- __weak App *weakSelf=self;self.view.sendLine=^(NSString *l){[weakSelf ctlSend:l];};[self startControlServer];[self watchBattery];
+ __weak App *weakSelf=self;self.view.sendLine=^(NSString *l){[weakSelf ctlSend:l];};[self startControlServer];[self watchBattery];[self watchOtherWindows];
  [CSMain.sharedInstance spiceSetDebug:NO];
  if(![CSMain.sharedInstance spiceStart]){fprintf(stderr,"SPICE worker failed\n");[NSApp terminate:nil];return;}
  if(self.socketPath)[self connectSpice];else [self startVM];
@@ -667,8 +673,8 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
   CFRunLoopSourceRef src=CFMachPortCreateRunLoopSource(NULL,self.swipeTap,0);CFRunLoopAddSource(CFRunLoopGetMain(),src,kCFRunLoopCommonModes);CFRelease(src);
  }else if(!want&&self.swipeTap){CGEventTapEnable(self.swipeTap,false);CFMachPortInvalidate(self.swipeTap);CFRelease(self.swipeTap);self.swipeTap=NULL;}
 }
-- (void)applicationDidBecomeActive:(NSNotification *)n {[self updateSwipeTap];}
-- (void)applicationDidResignActive:(NSNotification *)n {[self updateSwipeTap];}
+- (void)applicationDidBecomeActive:(NSNotification *)n {[self updateSwipeTap];[self.view refreshHostCursor];}
+- (void)applicationDidResignActive:(NSNotification *)n {[self updateSwipeTap];[self.view refreshHostCursor];}
 - (void)showSettings:(id)sender {
  if(!self.settingsWindow){
   NSTextField *(^label)(NSString *)=^NSTextField *(NSString *t){NSTextField *l=[NSTextField labelWithString:t];l.alignment=NSTextAlignmentRight;return l;};
@@ -808,7 +814,18 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
  if(![self pushClipboard]){NSBeep();return;}  // no helper link yet, or nothing to paste
  [self ctlSend:@"K 279"];
 }
-- (void)windowDidResignKey:(NSNotification *)n{[self.view releaseCapture];}
+- (void)windowDidResignKey:(NSNotification *)n{[self.view releaseCapture];
+ // Until the pointer comes back over Android, the Mac cursor is the one to see
+ if(n.object==self.window&&!self.view.locked){self.view.inside=NO;[self.view setHostCursorHidden:NO];}}
+- (void)windowDidBecomeKey:(NSNotification *)n{[self.view refreshHostCursor];}
+// The mouse over another app's window that sits on top of this one (a notification, a prompt
+// that didn't take the focus): that window gets the events, so this view never hears the pointer
+// leave. A global monitor sees exactly those events; the Mac cursor comes back for them.
+- (void)watchOtherWindows {
+ __weak App *weak=self;
+ [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskMouseMoved|NSEventMaskLeftMouseDragged|NSEventMaskRightMouseDragged handler:^(NSEvent *e){
+  VMView *v=weak.view;if(v.inside&&!v.locked){v.inside=NO;[v setHostCursorHidden:NO];v.sendLine(@"X");}}];
+}
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender{return NO;}
 - (void)windowWillClose:(NSNotification *)n{if(n.object==self.window)[NSApp terminate:nil];}
 - (void)applicationWillTerminate:(NSNotification *)n{[self.bluetooth stop];[self.view releaseCapture];[self.connection disconnect];}
