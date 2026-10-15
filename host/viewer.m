@@ -289,6 +289,8 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) NSTextField *setupTitle, *setupStep, *setupDetail;
 @property(nonatomic,strong) NSProgressIndicator *setupBar;
 @property(nonatomic,strong) NSButton *setupButton, *setupSecond;
+@property(nonatomic,strong) NSPopUpButton *setupStorage;
+@property(nonatomic,strong) NSTextField *setupStorageLabel, *setupStorageHint;
 @property(nonatomic,strong) NSTask *setupTask;
 @property(nonatomic,strong) NSMutableString *setupOut;
 @property(nonatomic,strong) id<NSObject> setupActivity;
@@ -598,7 +600,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 }
 - (void)showSetup {
  BOOL fresh=![[NSFileManager defaultManager] fileExistsAtPath:[workFolder() stringByAppendingPathComponent:@"image/googlebook.raw"]];
- NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,330) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
+ NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,fresh?380:330) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
  w.title=@"Googlebook VM";w.delegate=self;w.releasedWhenClosed=NO;
  NSImageView *icon=[NSImageView imageViewWithImage:NSApp.applicationIconImage];icon.translatesAutoresizingMaskIntoConstraints=NO;
  self.setupTitle=[self setupLabel:fresh?@"Welcome to Googlebook VM":@"Googlebook VM was updated" size:20 bold:YES];
@@ -608,7 +610,19 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  self.setupButton=[NSButton buttonWithTitle:fresh?@"Set Up":@"Update" target:self action:@selector(setupPressed:)];self.setupButton.keyEquivalent=@"\r";
  self.setupSecond=[NSButton buttonWithTitle:@"Quit" target:NSApp action:@selector(terminate:)];
  for(NSButton *b in @[self.setupButton,self.setupSecond])b.translatesAutoresizingMaskIntoConstraints=NO;
- NSView *c=w.contentView;for(NSView *v in @[icon,self.setupTitle,self.setupStep,self.setupBar,self.setupDetail,self.setupButton,self.setupSecond])[c addSubview:v];
+ // How much room Android gets. The Mac only uses what Android fills, so a roomy size costs
+ // nothing up front, and choosing now spares erasing Android to change it later.
+ self.setupStorageLabel=[self setupLabel:@"Storage for Android:" size:13 bold:NO];
+ self.setupStorage=[NSPopUpButton new];self.setupStorage.translatesAutoresizingMaskIntoConstraints=NO;
+ for(NSNumber *g in @[@32,@64,@128,@256,@512]){[self.setupStorage addItemWithTitle:[NSString stringWithFormat:@"%@ GB%@",g,g.intValue==32?@" (recommended)":@""]];self.setupStorage.lastItem.representedObject=g;}
+ NSTextField *storageHint=[self setupLabel:@"Your Mac only uses the space Android fills." size:11 bold:NO];self.setupStorageHint=storageHint;storageHint.textColor=NSColor.secondaryLabelColor;
+ self.setupStorage.toolTip=storageHint.stringValue;
+ for(NSView *v in @[self.setupStorageLabel,self.setupStorage,storageHint])v.hidden=!fresh;
+ NSView *c=w.contentView;for(NSView *v in @[icon,self.setupTitle,self.setupStep,self.setupBar,self.setupDetail,self.setupButton,self.setupSecond,self.setupStorageLabel,self.setupStorage,storageHint])[c addSubview:v];
+ [NSLayoutConstraint activateConstraints:@[
+  [self.setupStorageLabel.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:16],[self.setupStorageLabel.centerYAnchor constraintEqualToAnchor:self.setupStorage.centerYAnchor],
+  [self.setupStorage.leadingAnchor constraintEqualToAnchor:self.setupStorageLabel.trailingAnchor constant:8],[self.setupStorage.topAnchor constraintEqualToAnchor:self.setupStep.bottomAnchor constant:18],
+  [storageHint.leadingAnchor constraintEqualToAnchor:self.setupStorage.leadingAnchor],[storageHint.topAnchor constraintEqualToAnchor:self.setupStorage.bottomAnchor constant:4]]];
  [NSLayoutConstraint activateConstraints:@[
   [icon.topAnchor constraintEqualToAnchor:c.topAnchor constant:24],[icon.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:24],
   [icon.widthAnchor constraintEqualToConstant:64],[icon.heightAnchor constraintEqualToConstant:64],
@@ -627,12 +641,17 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 }
 - (void)setupPressed:(id)sender {
  if(self.setupTask)return;
- self.setupButton.enabled=NO;self.setupSecond.title=@"Stop";self.setupSecond.action=@selector(stopSetup:);self.setupSecond.target=self;
+ self.setupButton.enabled=NO;self.setupSecond.title=@"Stop";
+ NSNumber *gib=self.setupStorage.hidden?nil:self.setupStorage.selectedItem.representedObject;
+ for(NSView *v in @[self.setupStorage,self.setupStorageLabel,self.setupStorageHint,self.setupButton])v.hidden=YES;
+ // Only the progress is left to show
+ NSRect f=self.setupWindow.frame;CGFloat h=[self.setupWindow frameRectForContentRect:NSMakeRect(0,0,560,250)].size.height;
+ [self.setupWindow setFrame:NSMakeRect(f.origin.x,NSMaxY(f)-h,f.size.width,h) display:YES animate:YES];self.setupSecond.action=@selector(stopSetup:);self.setupSecond.target=self;
  self.setupBar.hidden=NO;self.setupBar.doubleValue=0;self.setupDetail.stringValue=@"Starting…";
  // Keep the Mac awake for the downloads (the display may still sleep)
  self.setupActivity=[[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated reason:@"Setting up Googlebook VM"];
  NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:bundledPython()];
- t.arguments=@[@"-I",@"-u",[NSBundle.mainBundle pathForResource:@"setup" ofType:@"py"],workFolder()];
+ t.arguments=[@[@"-I",@"-u",[NSBundle.mainBundle pathForResource:@"setup" ofType:@"py"],workFolder()] arrayByAddingObjectsFromArray:gib?@[@"--storage",gib.stringValue]:@[]];
  NSPipe *p=[NSPipe pipe];t.standardOutput=p;t.standardError=[NSFileHandle fileHandleWithNullDevice];self.setupOut=[NSMutableString string];
  __weak App *weak=self;
  p.fileHandleForReading.readabilityHandler=^(NSFileHandle *h){NSData *d=h.availableData;if(!d.length){h.readabilityHandler=nil;return;}
@@ -657,7 +676,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 }
 - (void)setupFailed:(NSString *)message {
  self.setupTitle.stringValue=@"Setup didn't finish";self.setupStep.stringValue=message;self.setupBar.hidden=YES;self.setupDetail.stringValue=@"Nothing is lost: Try Again picks up where it stopped.";
- self.setupButton.title=@"Try Again";self.setupButton.enabled=YES;self.setupSecond.title=@"Quit";self.setupSecond.target=NSApp;self.setupSecond.action=@selector(terminate:);
+ self.setupButton.title=@"Try Again";self.setupButton.enabled=YES;self.setupButton.hidden=NO;self.setupSecond.title=@"Quit";self.setupSecond.target=NSApp;self.setupSecond.action=@selector(terminate:);
 }
 - (void)stopSetup:(id)sender {[self.setupTask terminate];}
 - (void)setupEnded:(int)status {

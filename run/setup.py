@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """First-run setup and updates for the downloadable app (package-app.sh builds it).
 
-  setup.py WORK          set up or update everything in WORK (the app runs this)
+  setup.py WORK [--storage GIB]   set up or update everything in WORK (the app runs this);
+                                  a first setup gives Android GIB of storage (32 by default)
   setup.py WORK --check  exit 0 if WORK is ready for this app, 1 if setup has work to do
 
 The app carries the VM engine prebuilt (Resources/runtime: QEMU, gfxstream, the guest pieces, the
@@ -30,7 +31,7 @@ def progress(f, detail=''): say(f'@progress {max(0.0, min(1.0, f)):.4f} {detail}
 class Failure(Exception): pass
 
 
-def gb(n): return f'{n / 1e9:.1f} GB'
+def gb(n): return f'{n / 1e9:.1f} GB' if n >= 1e9 else f'{n / 1e6:.0f} MB'
 
 
 def sha256(path, label):
@@ -243,6 +244,12 @@ def main():
         step(5, n, steps[4])
         if fresh:
             build_image(work, work / 'image', log)
+            # The storage chosen in the setup window; nothing is on it yet, so no backup either
+            gib = int(sys.argv[sys.argv.index('--storage') + 1]) if '--storage' in sys.argv else 32
+            if gib != 32:
+                progress(0.98, "Making Android's storage…")
+                run([sys.executable, RES / 'storage.py', work, str(gib)], log, what="Sizing Android's storage")
+                (work / 'image/googlebook.raw.before-update').unlink(missing_ok=True)
         elif not system_current(work) or changed:
             # update-image.sh: a fresh image beside the old one, then only the system area is copied over
             new = Path(tempfile.mkdtemp(dir=work, prefix='image-new.'))

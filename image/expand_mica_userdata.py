@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Give a cloned image a fresh 16 GiB userdata partition.
+"""Give a cloned image a fresh 32 GiB userdata partition (the app's setup and Settings can pick another size).
 Preserves all original partition contents; moves only userdata's GPT mapping to
 new sparse space beyond the old image and relocates the backup GPT. Android
 formats/encrypts the fresh area normally. Refuses to run on the original download.
@@ -23,7 +23,7 @@ with p.open('r+b') as f:
  blba=struct.unpack_from('<Q',bh,72)[0];f.seek(blba*512);assert f.read(n*es)==entries
  targets=[i for i in range(n) if entries[i*es+56:(i+1)*es].decode('utf-16le').rstrip('\0')=='userdata'];assert len(targets)==1
  i=targets[0];oldrange=struct.unpack_from('<QQ',entries,i*es+32)
- start=(oldsize+1048575)//1048576*2048;size=16*1024**3//512;end=start+size-1
+ start=(oldsize+1048575)//1048576*2048;size=32*1024**3//512;end=start+size-1
  backup_entries=end+1;newlast=backup_entries+n*es//512
  for k in range(n):
   if k==i or not any(entries[k*es:k*es+16]):continue

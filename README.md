@@ -29,7 +29,7 @@ You need a Mac with **Apple silicon** (M1 or newer) running **macOS 26 or newer*
 
 1. **[Download Googlebook VM](https://github.com/Rarasinhoo/gbos-vm/releases/latest/download/Googlebook-VM.dmg)** and open it. Drag **Googlebook VM** into **Applications**.
 2. **Open it from Applications.** The first time, macOS says it can't check the app for malware, because it isn't signed with a paid Apple developer account. Click **Done**, then open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to *"Googlebook VM" was blocked*. Enter your password and click **Open Anyway** again. You only do this once.
-3. **Click Set Up.** Googlebook VM downloads Googlebook OS from Google (about 9 GB) and prepares it for your Mac. That takes 15 to 45 minutes, depending on your internet connection, and you can keep using your Mac meanwhile. If it stops halfway, **Try Again** picks up where it left off.
+3. **Pick how much storage Android gets** (32 GB unless you choose more; your Mac only uses what Android fills) and **click Set Up.** Googlebook VM downloads Googlebook OS from Google (about 9 GB) and prepares it for your Mac. That takes 15 to 45 minutes, depending on your internet connection, and you can keep using your Mac meanwhile. If it stops halfway, **Try Again** picks up where it left off.
 
 <p align="center"><img src="docs/images/setup.png" width="560" alt="The setup window: Welcome to Googlebook VM"></p>
 
@@ -53,7 +53,7 @@ Move your pointer into the window and you're using Android. Move it out and you'
 
 **Trackpad.** One finger moves the pointer, as on your Mac. Two fingers scroll (and a two-finger click is a right-click), pinch zooms, and three fingers swipe and tap the way they do on a Googlebook. If your Mac uses three- or four-finger swipes for Mission Control, turn on **Trackpad** in Settings to give them to Android while your pointer is over it.
 
-**Settings** (`⌘,`) has the screen resolution, how much memory and how many processor cores Android gets, the network, and Android's storage. Android starts with 16 GB of storage, which Google's apps fill quickly; **Change…** gives it up to 1 TB. Android has to start over empty when you do that, like after a factory reset, and the app offers it when storage runs low. Your Mac only uses the space Android actually fills.
+**Settings** (`⌘,`) has the screen resolution, how much memory and how many processor cores Android gets, the network, and Android's storage. Android gets the storage you chose at setup; **Change…** gives it anywhere from 16 GB to 1 TB. Android has to start over empty when you do that, like after a factory reset, and the app offers it when storage runs low. Your Mac only uses the space Android actually fills.
 
 **Network.** Android is online through your Mac. Choose **On this Mac's network** in Settings, and Android joins your Wi-Fi as its own device, so your phone can find it. The app asks for your password once to set that up.
 
