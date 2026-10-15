@@ -48,7 +48,8 @@ static unsigned short scan[128] = {
 @property(nonatomic) CGPoint carry;     // captured mouse: motion not sent yet, under one guest pixel
 @property(nonatomic,strong) NSMutableDictionary *touchIds;  // NSTouch identity -> small id for the guest
 @property(nonatomic) int nextTouchId, padButton;
-@property(nonatomic,strong) NSArray *padContacts;           // the last contacts sent, for button changes
+@property(nonatomic,strong) NSArray *padContacts;
+@property(nonatomic,strong) NSDictionary *twoFingerStart;   // where two fingers came down, to tell a tap from a gesture           // the last contacts sent, for button changes
 @property(nonatomic,strong) NSTrackingArea *tracking;
 // Absolute mode: the helper inside Android puts Android's own pointer exactly where the Mac
 // cursor is (hidden over the window), so it moves in and out of the window freely.
@@ -157,9 +158,21 @@ static unsigned short scan[128] = {
 - (void)trackpad:(NSEvent *)e {
  NSSet<NSTouch *> *touches=[e touchesMatchingPhase:NSTouchPhaseTouching inView:self];
  self.fingers=touches.count;
- // Two fingers or more: Android's own touchpad gestures (scrolling with its momentum, pinch,
- // three-finger swipes). One finger stays the Mac cursor, which Android's pointer follows.
- BOOL gesture=self.absolute&&!self.locked&&touches.count>=2&&[[NSUserDefaults standardUserDefaults] boolForKey:@"TrackpadGestures"];
+ // Gestures are Android's own (scrolling with its momentum, pinch, three-finger swipes and
+ // taps); one finger stays the Mac cursor, which Android's pointer follows. Two fingers go to
+ // Android only once they move: a two-finger tap is the Mac's right click, and Android, which
+ // takes taps too, would click a second time.
+ BOOL gesture=NO;
+ if(self.absolute&&!self.locked){
+  if(touches.count<2)self.twoFingerStart=nil;
+  else if(touches.count>=3||self.padContacts.count)gesture=YES;
+  else {
+   if(!self.twoFingerStart){NSMutableDictionary *d=[NSMutableDictionary dictionary];for(NSTouch *t in touches)d[t.identity]=[NSValue valueWithPoint:t.normalizedPosition];self.twoFingerStart=d;}
+   for(NSTouch *t in touches){NSValue *v=self.twoFingerStart[t.identity];if(!v){gesture=YES;break;}
+    NSPoint a=v.pointValue,b=t.normalizedPosition;CGFloat mm=hypot((b.x-a.x)*t.deviceSize.width,(b.y-a.y)*t.deviceSize.height)*25.4/72;
+    if(mm>1.5){gesture=YES;break;}}
+  }
+ }
  if(!gesture){if(self.padContacts.count)[self sendPadContacts:@[]];return;}
  if(!self.touchpadReady){
   // First touch: ask the guest for a touchpad the size of this one (deviceSize is in 1/72 inch).
@@ -175,7 +188,7 @@ static unsigned short scan[128] = {
  [self sendPadContacts:contacts];
 }
 // The trackpad goes to the guest's touchpad only once it exists and while Settings allow it.
-- (BOOL)padActive {return self.touchpadReady&&[[NSUserDefaults standardUserDefaults] boolForKey:@"TrackpadGestures"];}
+- (BOOL)padActive {return self.touchpadReady;}
 - (void)sendPadContacts:(NSArray<NSArray<NSNumber *> *> *)contacts {
  self.padContacts=contacts;
  NSMutableString *l=[NSMutableString stringWithFormat:@"F %d %lu",self.padButton,(unsigned long)contacts.count];
@@ -297,8 +310,8 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  {NSUserDefaults *u=[NSUserDefaults standardUserDefaults];  // the network checkboxes became one choice
   if(![u objectForKey:@"Network"]&&([u objectForKey:@"Networking"]||[u objectForKey:@"IsolateNetwork"]))
    [u setObject:([u objectForKey:@"Networking"]&&![u boolForKey:@"Networking"])?@"off":[u boolForKey:@"IsolateNetwork"]?@"isolated":@"full" forKey:@"Network"];
-  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"RefreshCap",@"Graphics",@"PointerMode",@"AndroidTouchpad"])[u removeObjectForKey:k];}
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES,@"TrackpadGestures":@YES}];
+  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"RefreshCap",@"Graphics",@"PointerMode",@"AndroidTouchpad",@"TrackpadGestures"])[u removeObjectForKey:k];}
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
@@ -585,7 +598,6 @@ static int bridgeVersion(NSString *path) {
 }
 - (void)checkChanged:(NSButton *)sender {
  [[NSUserDefaults standardUserDefaults] setBool:sender.state==NSControlStateValueOn forKey:sender.identifier];
- if([sender.identifier isEqualToString:@"TrackpadGestures"]&&self.view.padContacts.count)[self.view sendPadContacts:@[]];
 }
 - (void)showSettings:(id)sender {
  if(!self.settingsWindow){
@@ -593,7 +605,6 @@ static int bridgeVersion(NSString *path) {
   NSTextField *hint=[self hint:@"The Mac cursor drives Android; the mouse locks only for an app that asks (⌃⌥ releases)."];
   NSTextField *note=[self hint:@"Everything below applies the next time you start the VM."];
   NSGridView *grid=[NSGridView gridViewWithViews:@[
-   @[label(@"Trackpad:"),[self checkbox:@"TrackpadGestures" title:@"Android's gestures: two-finger scrolling, pinch, three-finger swipes"]],
    @[[NSGridCell emptyContentView],hint],
    @[label(@"Clipboard:"),[self checkbox:@"GuestClipboardToMac" title:@"Copy text copied in Android to the Mac clipboard"]],
    @[[NSGridCell emptyContentView],note],

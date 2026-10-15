@@ -277,12 +277,12 @@ public final class Input {
             waitForDevice(touchpadProcess, "VM Touchpad");
             touchpad = o; padW = w; padH = h;
             java.util.Arrays.fill(slotContact, -1);
-            // The Mac decides what is a click (a press, or a tap if the Mac has tap to click), so
-            // Android must not turn taps into clicks as well; scroll direction follows the Mac.
+            // Taps are Android's too (three-finger tap): the viewer only sends two fingers once
+            // they move, so a two-finger tap stays the Mac's right click. Scroll direction follows the Mac.
             // In the background: each `settings` call takes about a second, and touches must not wait.
             Thread prefs = new Thread(() -> {
                 try {
-                    Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_tap_to_click", "0" }).waitFor();
+                    Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_tap_to_click", "1" }).waitFor();
                     Runtime.getRuntime().exec(new String[] { "settings", "--user", "current", "put", "system", "touchpad_natural_scrolling", natural ? "1" : "0" }).waitFor();
                 } catch (Throwable t) { System.out.println("VM_INPUT touchpad settings: " + t); }
             }, "touchpad-settings");
