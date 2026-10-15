@@ -2,13 +2,14 @@
 """Make Mach-O files self-contained: copy every library they need from outside macOS (Homebrew's,
 the build tree's) into one folder, and point them all at it.
 
-  bundle_dylibs.py LIB_DIR FILE...
+  bundle_dylibs.py [--record LIST] LIB_DIR FILE...
 
 Each FILE (an executable or a library already in its final place) and every library copied into
 LIB_DIR then finds its libraries through @rpath, with an rpath relative to itself (@loader_path),
 so the folder they are in can move. Frameworks named @rpath/X.framework (UTM's, found at run time
 through DYLD_FRAMEWORK_PATH) and macOS's own libraries are left as they are. Rpaths that point
-into this build machine are removed. Everything changed is ad-hoc signed again.
+into this build machine are removed. Everything changed is ad-hoc signed again. --record appends
+where each copied library came from to LIST (for the third-party notices).
 """
 import os, re, shutil, subprocess, sys
 from pathlib import Path
@@ -48,8 +49,10 @@ def local(dep):
 
 
 def main():
-    lib = Path(sys.argv[1]).resolve(); lib.mkdir(parents=True, exist_ok=True)
-    todo = [Path(p).resolve() for p in sys.argv[2:]]; done = set(); search = ['/opt/homebrew/lib']
+    argv = sys.argv[1:]; record = None
+    if argv[0] == '--record': record, argv = argv[1], argv[2:]
+    lib = Path(argv[0]).resolve(); lib.mkdir(parents=True, exist_ok=True)
+    todo = [Path(p).resolve() for p in argv[1:]]; done = set(); search = ['/opt/homebrew/lib']
     origin = {}   # copied library -> where it came from
     while todo:
         f = todo.pop()
@@ -69,6 +72,8 @@ def main():
             dst = lib / name
             if not dst.exists():
                 shutil.copyfile(src, dst); os.chmod(dst, 0o755); origin[dst] = src
+                if record:
+                    with open(record, 'a') as r: r.write(f'{src}\n')
                 subprocess.run(['install_name_tool', '-id', f'@rpath/{name}', str(dst)], check=True, capture_output=True)
             todo.append(dst)
             args += ['-change', dep, f'@rpath/{name}']
