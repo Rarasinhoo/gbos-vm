@@ -10,7 +10,7 @@ The real Googlebook OS, straight from Google, accelerated by your Mac's GPU. Fre
   &nbsp;·&nbsp; Apple silicon (M1 or newer) &nbsp;·&nbsp; macOS 26 or newer
 </p>
 
-![Googlebook OS running in a window on a Mac](docs/images/desktop.jpg)
+![Googlebook OS on a Mac: Chrome, Files and Settings opening as windows on the desktop](docs/images/demo.gif)
 
 Googlebook OS is Android 17 made for laptops: a desktop with windows, a taskbar, Chrome and Google's apps. Googlebook VM downloads Google's own image for the Dell Googlebook and runs it on your Mac like an app. It isn't an emulator image or a lookalike.
 
@@ -37,7 +37,7 @@ Then Android starts, in about 45 seconds. Next time, it opens straight into Andr
 
 ## Using it
 
-![Settings and Files open side by side, as windows on the Googlebook desktop](docs/images/windows.jpg)
+![Chrome, Files and Settings open as windows on the Googlebook desktop](docs/images/windows.jpg)
 
 Move your pointer into the window and you're using Android. Move it out and you're back on your Mac.
 
