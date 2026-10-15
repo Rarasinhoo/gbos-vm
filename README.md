@@ -19,6 +19,8 @@ Googlebook OS is Android 17 made for laptops: a desktop with windows, a taskbar,
 - **Everything plugged in.** Android uses your Mac's camera, microphone and speakers, sees its battery, and is online through your Mac. It can also join your Wi-Fi network as its own device.
 - **Easy.** Download, open, click Set Up. No Terminal.
 
+![Chrome running full screen in Googlebook OS](docs/images/chrome.jpg)
+
 > Googlebook VM isn't made by or affiliated with Google or Dell, and it isn't a verified Googlebook. Read [Is it safe?](#is-it-safe) before you sign in to anything.
 
 ## Get it
