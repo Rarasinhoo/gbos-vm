@@ -12,6 +12,16 @@ IMAGE_DIR="${GBOS_IMAGE_DIR:-$WORK/image}"
 "$ROOT/build-host.sh"
 "$ROOT/build-guest.sh"
 "$ROOT/build-gfxstream.sh"
+# What the system part is made from: this repository's image, guest and tool sources, the guest
+# binaries just built, and the image flags. Unchanged since the disk was last brought up to date,
+# there is nothing to rebuild (an app-only change stops here).
+inputs() {
+  { cd "$ROOT" && git ls-files -co --exclude-standard -- image guest tools tools-src patches '*.sh' | LC_ALL=C sort | while read -r f; do if [ -f "$f" ]; then printf "%s " "$f"; shasum -a 256 <"$f"; fi; done
+    find "$WORK/guest" -type f -print0 2>/dev/null | LC_ALL=C sort -z | xargs -0 shasum -a 256
+    echo "flags ${GBOS_IMAGE_FLAGS:-}"; } | shasum -a 256 | cut -d' ' -f1
+}
+STAMP="$IMAGE_DIR/system-inputs.sha256"
+if [ "$(cat "$STAMP" 2>/dev/null)" = "$(inputs)" ]; then say "The system part is already up to date"; exit 0; fi
 # A fresh scratch folder, so nothing that already exists (your image included) is ever removed.
 NEW="$(mktemp -d "$WORK/image-new.XXXXXX")"
 trap 'rm -rf "$NEW"' EXIT
@@ -25,4 +35,5 @@ python3 "$ROOT/image/sync_super.py" "$IMAGE_DIR/googlebook.raw" "$NEW/googlebook
 mv -f "$NEW/initrd.img" "$NEW/kernel.Image" "$IMAGE_DIR/"
 rm -f "$IMAGE_DIR"/*.json  # build notes describe the system part, so they all come from the new build
 cp "$NEW"/*.json "$IMAGE_DIR/" 2>/dev/null || true
+inputs >"$STAMP"
 say "Image updated"

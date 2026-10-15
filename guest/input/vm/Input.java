@@ -92,6 +92,9 @@ public final class Input {
         Thread capture = new Thread(Input::watchPointerCapture, "capture");
         capture.setDaemon(true);
         capture.start();
+        Thread storage = new Thread(Input::reportStorage, "storage");
+        storage.setDaemon(true);
+        storage.start();
         boolean waiting = false;
         while (true) {
             // No token, no connection.
@@ -507,6 +510,23 @@ public final class Input {
         }, tag);
         t.setDaemon(true);
         t.start();
+    }
+
+    /** How full Android's storage is ("d FREE TOTAL", MiB), so the viewer can warn before it runs
+     *  out: on each new link, then every ten minutes. */
+    private static void reportStorage() {
+        OutputStream sentTo = null; long sentAt = 0;
+        while (true) {
+            OutputStream o = out;
+            if (o != null && (o != sentTo || SystemClock.uptimeMillis() - sentAt > 600_000)) {
+                try {
+                    android.os.StatFs f = new android.os.StatFs("/data");
+                    reply("d " + (f.getAvailableBytes() >> 20) + " " + (f.getTotalBytes() >> 20));
+                    sentTo = o; sentAt = SystemClock.uptimeMillis();
+                } catch (Throwable t) { /* not this time */ }
+            }
+            SystemClock.sleep(15_000);
+        }
     }
 
     private static void reply(String line) {

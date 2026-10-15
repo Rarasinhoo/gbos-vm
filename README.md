@@ -52,11 +52,11 @@ We build and test on one machine (M5, 16 GB, macOS 27). A couple of people have 
 
 Android shows your Mac's battery: its level, and whether it is charging (a VM has no battery of its own, so it used to read empty). Quitting (or closing the window) shuts Android down properly. Your data lives in `work/image/googlebook.raw` and sticks around between runs.
 
-**Settings** (`⌘,`) has resolution, memory, CPU cores and network, which apply the next time the VM starts, and the trackpad swipes option, which applies right away. Audio, the camera, the microphone and the clipboard are always on: macOS asks before Android first uses the camera or microphone, and they run only while an Android app uses them. The refresh rate isn't a setting: it follows the screen the window opens on (Android's own refresh setting has nothing to switch between, since the virtual display offers it one rate).
+**Settings** (`⌘,`) has resolution, memory (up to what leaves macOS 8 GB), CPU cores and network, which apply the next time the VM starts, and the trackpad swipes option, which applies right away. Audio, the camera, the microphone and the clipboard are always on: macOS asks before Android first uses the camera or microphone, and they run only while an Android app uses them. The refresh rate isn't a setting: it follows the screen the window opens on (Android's own refresh setting has nothing to switch between, since the virtual display offers it one rate).
 
 Resolution defaults to your display's native pixels at 16:10, and Android's UI is sized the way macOS sizes its own (density 320 at native resolution on a Retina screen, macOS's 2x). On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel. Settings also offers 1080p, 1440p, 4K and 3440 × 1440 ultrawide.
 
-**Android storage** starts at 16 GB, which Android with Google's apps fills quickly. **Change…** next to it in Settings gives Android a bigger one (16 to 1024 GB; `run/storage.py` does it from a shell). Android encrypts its storage, so it can't grow in place: it starts over empty, as after a factory reset, and the VM restarts. The disk file is sparse, so the Mac only uses the space Android fills; the previous disk is kept as `googlebook.raw.before-update` until the next update.
+**Android storage** starts at 16 GB, which Android with Google's apps fills quickly. **Change…** next to it in Settings gives Android a bigger one (16 to 1024 GB; `run/storage.py` does it from a shell). Android encrypts its storage, so it can't grow in place: it starts over empty, as after a factory reset, and the VM restarts. The disk file is sparse, so the Mac only uses the space Android fills; the previous disk is kept as `googlebook.raw.before-update` until Android has started on the new one. When Android's storage is nine-tenths full, the app offers this.
 
 **Clipboard.** `⌘V` pastes the Mac clipboard into the guest, and that is the only time it is sent. Text copied in Android goes to the Mac clipboard.
 
@@ -72,7 +72,7 @@ After a `git pull`, quit the VM and run:
 
 It rebuilds whatever changed (the app, the guest helpers, the graphics stack) and refreshes the system part of your disk.
 
-`update-image.sh` keeps your data — it only replaces the system area, and it leaves the previous disk next to the new one as `googlebook.raw.before-update` in case something goes wrong.
+`update-image.sh` keeps your data — it only replaces the system area, and it leaves the previous disk next to the new one as `googlebook.raw.before-update` in case something goes wrong, until Android has started on the new one. When only the app changed, it stops after rebuilding the app.
 
 If you'd rather start it from a terminal, `python3 run/launch.py work` opens the app and waits for it to quit; `--display 1920x1200` and `--fullscreen` set those options first.
 

@@ -252,6 +252,7 @@ static unsigned short scan[128] = {
 @property(nonatomic) CFMachPortRef swipeTap;
 @property(nonatomic,strong) NSString *runDir;
 @property(nonatomic,strong) NSString *workDir;
+@property(nonatomic) BOOL backupDropped, storageWarned;
 @property(nonatomic) BOOL quitting;
 @property(nonatomic) BOOL restarting;
 @property(nonatomic) BOOL densitySent;
@@ -672,12 +673,17 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
  if(!self.settingsWindow){
   NSTextField *(^label)(NSString *)=^NSTextField *(NSString *t){NSTextField *l=[NSTextField labelWithString:t];l.alignment=NSTextAlignmentRight;return l;};
   NSTextField *note=[self hint:@"Display, memory, processor and network changes apply when the VM restarts."];
+  // Memory up to what leaves macOS 8 GB, cores up to all of this Mac's
+  NSMutableArray *memTitles=[NSMutableArray array],*memValues=[NSMutableArray array],*cpuTitles=[NSMutableArray array],*cpuValues=[NSMutableArray array];
+  unsigned long long mac=NSProcessInfo.processInfo.physicalMemory>>30;
+  for(NSNumber *g in @[@4,@6,@8,@12,@16,@24,@32,@48,@64])if(g.intValue==4||g.unsignedLongLongValue+8<=mac){[memTitles addObject:[NSString stringWithFormat:@"%@ GB",g]];[memValues addObject:@(g.intValue*1024)];}
+  for(NSNumber *n in @[@2,@4,@6,@8,@10,@12,@16,@20,@24])if(n.unsignedIntegerValue<=NSProcessInfo.processInfo.processorCount){[cpuTitles addObject:n.stringValue];[cpuValues addObject:n];}
   NSBox *(^line)(void)=^NSBox *{NSBox *b=[NSBox new];b.boxType=NSBoxSeparator;return b;};
   NSGridView *grid=[NSGridView gridViewWithViews:@[
    @[label(@"Resolution:"),[self popup:@"Resolution" titles:@[@"Match this Mac's display",@"1920 × 1080 (16:9)",@"2560 × 1440 (16:9)",@"3840 × 2160 (16:9, 4K)",@"3440 × 1440 (21:9 ultrawide)",@"1920 × 1200 (16:10)",@"2560 × 1600 (16:10)",@"3024 × 1890 (16:10)",@"3456 × 2160 (16:10)"] values:@[@"native",@"1920x1080",@"2560x1440",@"3840x2160",@"3440x1440",@"1920x1200",@"2560x1600",@"3024x1890",@"3456x2160"]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"StartFullscreen" title:@"Start in full screen"]],
-   @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],
-   @[label(@"Processor cores:"),[self popup:@"CPUs" titles:@[@"4",@"6",@"8"] values:@[@4,@6,@8]]],
+   @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:memTitles values:memValues]],
+   @[label(@"Processor cores:"),[self popup:@"CPUs" titles:cpuTitles values:cpuValues]],
    @[label(@"Android storage:"),[NSStackView stackViewWithViews:@[[NSTextField labelWithString:[NSString stringWithFormat:@"%ld GB",(long)[[self storage:@[]] integerValue]]],[NSButton buttonWithTitle:@"Change…" target:self action:@selector(changeStorage:)]]]],
    @[label(@"Network:"),[self popup:@"Network" titles:@[@"Through this Mac",@"On this Mac's network (phones nearby can find it)"] values:@[@"full",@"lan"]]],
    @[[NSGridCell emptyContentView],note],
@@ -703,11 +709,27 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
  if([line hasPrefix:@"p "]){self.view.touchpadReady=[line isEqualToString:@"p touchpad"];fprintf(stderr,"CONTROL touchpad %s\n",line.UTF8String+2);return;}
  if([line hasPrefix:@"k "]){self.view.wantsLock=[line isEqualToString:@"k 1"];fprintf(stderr,"CONTROL pointer capture %s\n",self.view.wantsLock?"requested":"released");
   if(self.view.wantsLock)[self.view lockForApp];else [self.view unlock];[self updateSubtitle];return;}
- // Guest to Mac clipboard is opt in (Settings): a guest app could plant text to paste into Terminal.
+ if([line hasPrefix:@"d "]){[self storageFree:[line componentsSeparatedByString:@" "]];return;}
+ // Text copied in Android goes to the Mac clipboard
  if([line hasPrefix:@"c "]&&[[NSUserDefaults standardUserDefaults] boolForKey:@"GuestClipboardToMac"]){
   NSData *d=[[NSData alloc] initWithBase64EncodedString:[line substringFromIndex:2] options:0];NSString *t=d?[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]:nil;
   if(t.length){NSPasteboard *pb=[NSPasteboard generalPasteboard];[pb clearContents];[pb setString:t forType:NSPasteboardTypeString];}
  }
+}
+// Android's storage, as the helper reports it. The first report of a run means Android is up and
+// the disk works, so a backup of the previous disk (from an update or a storage change) can go;
+// and when less than a tenth is left, offer more, once a run.
+- (void)storageFree:(NSArray<NSString *> *)f {
+ if(f.count<3)return;long long avail=f[1].longLongValue,total=f[2].longLongValue;if(total<=0)return;
+ if(!self.backupDropped&&self.workDir){self.backupDropped=YES;
+  NSString *b=[self.workDir stringByAppendingPathComponent:@"image/googlebook.raw.before-update"];
+  if([[NSFileManager defaultManager] removeItemAtPath:b error:nil])fprintf(stderr,"STORAGE dropped the previous disk's backup\n");}
+ if(self.storageWarned||avail*10>=total)return;
+ self.storageWarned=YES;
+ NSAlert *a=[NSAlert new];a.messageText=@"Android is running out of storage";
+ a.informativeText=[NSString stringWithFormat:@"%.1f GB of %.0f GB left. Android can get a bigger storage, but it starts over empty, as after a factory reset.",avail/1024.0,total/1024.0];
+ [a addButtonWithTitle:@"Not Now"];[a addButtonWithTitle:@"Change Storage…"];
+ [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r){if(r==NSAlertSecondButtonReturn)[self changeStorage:nil];}];
 }
 - (NSString *)ctlHmac:(NSString *)msg {
  const char *tk=getenv("VM_INPUT_TOKEN");NSData *m=[msg dataUsingEncoding:NSUTF8StringEncoding];unsigned char mac[CC_SHA256_DIGEST_LENGTH];
