@@ -34,7 +34,7 @@ handle() {
       timeout 8 dumpsys activity activities 2>/dev/null | grep -E 'ResumedActivity|\* Task\{|  \* Hist' | head -12 | cut -c1-200 | sed 's/^/VM_CONTROL activity /' ;;
     VM_NEARBY)
       # Quick Share and Nearby: what they log about discovery, Bluetooth and Wi-Fi
-      timeout 10 logcat -d -b main,system -t 60000 2>/dev/null | grep -i -E 'nearby|quickshare|sharing|fastpair|mdns|nsd|medium|bluetoothle|BtGatt|suspend|bt_|bluetooth|scanmanager|scanner' | tail -300 | cut -c1-230 | sed 's/^/VM_CONTROL nearby /' ;;
+      timeout 10 logcat -d -b main,system -t 60000 2>/dev/null | grep -i -E 'nearby|quickshare|sharing|fastpair|mdns|nsd|medium|bluetoothle|BtGatt|suspend|bt_|bluetooth|scanmanager|scanner|l2cap|wifilan' | grep -v -i -E 'instantOnLost|instant on lost|AdvertiseSuspend|Suspending!|clearcut|RateLimit|bluetooth-cf|certificate' | tail -400 | cut -c1-230 | sed 's/^/VM_CONTROL nearby /' ;;
     VM_TOP)
       # What is using the guest's CPUs: one snapshot of the busiest processes and threads
       timeout 10 top -b -n 1 -m 20 2>&1 | head -30 | cut -c1-150 | sed 's/^/VM_CONTROL top /'
