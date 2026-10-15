@@ -32,6 +32,19 @@ handle() {
       timeout 10 logcat -d -b main,system,events -t 20000 2>/dev/null | grep -E 'ActivityTaskManager|am_create_activity|am_crash|am_proc_died|wm_finish_activity|ActivityStarter' | tail -30 | cut -c1-220 | sed 's/^/VM_CONTROL starts /'
       timeout 8 dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -4 | cut -c1-200 | sed 's/^/VM_CONTROL focus /'
       timeout 8 dumpsys activity activities 2>/dev/null | grep -E 'ResumedActivity|\* Task\{|  \* Hist' | head -12 | cut -c1-200 | sed 's/^/VM_CONTROL activity /' ;;
+    VM_QUICKSHARE)
+      # Quick Share's send screen, with a line of text to send (for testing it from the Mac)
+      u=$(timeout 5 am get-current-user)
+      timeout 10 am start --user "$u" -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT 'Quick Share test from the VM' -p com.google.android.gms 2>&1 | head -3 | sed 's/^/VM_CONTROL quickshare /' ;;
+    VM_UI)
+      # What is on screen: each element with text or a description, and where (for VM_TAP)
+      timeout 15 uiautomator dump /data/local/tmp/vm-ui.xml >/dev/null 2>&1
+      tr '>' '\n' </data/local/tmp/vm-ui.xml | grep -o -E '(text|content-desc)="[^"]+"[^/]*bounds="[^"]*"' | sed -E 's/ (resource-id|class|package|checkable|checked|clickable|enabled|focusable|focused|scrollable|long-clickable|password|selected)="[^"]*"//g' | head -120 | cut -c1-200 | sed 's/^/VM_CONTROL ui /'
+      rm -f /data/local/tmp/vm-ui.xml ;;
+    VM_TAP\ [0-9]*\ [0-9]*)
+      t=${line#VM_TAP }; x=${t%% *}; y=${t#* }
+      case "$x$y" in *[!0-9]*) return ;; esac
+      timeout 5 input tap "$x" "$y"; echo "VM_CONTROL tapped $x $y" ;;
     VM_NEARBY)
       # Quick Share and Nearby: what they log about discovery, Bluetooth and Wi-Fi
       timeout 10 logcat -d -b main,system -t 60000 2>/dev/null | grep -i -E 'nearby|quickshare|sharing|fastpair|mdns|nsd|medium|bluetoothle|BtGatt|suspend|bt_|bluetooth|scanmanager|scanner|l2cap|wifilan' | grep -v -i -E 'instantOnLost|instant on lost|AdvertiseSuspend|Suspending!|clearcut|RateLimit|bluetooth-cf|certificate' | tail -400 | cut -c1-230 | sed 's/^/VM_CONTROL nearby /' ;;

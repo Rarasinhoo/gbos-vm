@@ -101,6 +101,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 @property(nonatomic,strong,nullable) CBCentralManager *central;
 @property(nonatomic,strong) NSMutableDictionary<NSUUID *,GBMirror *> *mirrors;
 @property(nonatomic,strong,nullable) dispatch_source_t sweep;
+@property(nonatomic,strong,nullable) NSMutableDictionary<NSString *,NSMutableSet *> *tally;
 @property(nonatomic,strong,nullable) CBPeripheralManager *advertiser;
 @property(nonatomic,strong,nullable) GBListener *listener;
 @property(nonatomic,strong,nullable) NSDictionary *advertising;   // what the Mac advertises for Android
@@ -122,8 +123,9 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
  NSMutableData *_l2cap;                  // a PDU being reassembled
  NSUInteger _l2capWant;
  uint16_t _mtu;
- NSData *_advData, *_scanData;
+ NSData *_advData;   // what is being advertised (all sets), to tell a change
  BOOL _advertising, _extended;
+ NSArray<NSData *> *_sets;               // the advertisements in extended mode, one set each
  NSMutableArray<GBAttr *> *_attrs;       // nil until the real device's database is discovered
  NSUInteger _discovering;
  NSMutableArray<NSData *> *_attQueue;    // requests from Android waiting for the database or a reply
@@ -239,11 +241,13 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 
 #pragma mark Advertising
 
-// What CoreBluetooth heard, as advertising data. In a classic (legacy) advertisement when it
-// fits, the rest in its scan response (CoreBluetooth reports both together); otherwise in one
-// extended advertisement of up to 251 bytes, as Nearby's beacons often need. A controller
-// takes one kind or the other until it is reset, so a twin that outgrows the classic one is
-// reset and starts over extended.
+// What CoreBluetooth heard, as advertising data. CoreBluetooth merges what a device advertises
+// into one record, but phones send several small advertisements (Nearby, Quick Share, Fast Pair
+// each their own), and scanners look for them as such: one classic advertisement can't carry
+// them all, and an extended one is missed by the many scans that only take classic ones. So
+// what doesn't fit one classic advertisement goes out as several, each its own advertising set
+// sending classic (legacy) PDUs; only an item too big for any classic one gets an extended set.
+static const NSUInteger kMaxSets = 4;
 - (void)updateAdvertisement:(NSDictionary *)ad {
  self.advertisement=ad;
  NSMutableArray<NSData *> *items=[NSMutableArray array];
@@ -251,68 +255,74 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
   NSMutableData *d=[NSMutableData data];put8(d,(uint8_t)v.length+1);put8(d,type);[d appendData:v];[items addObject:d];};
  NSMutableData *u16=[NSMutableData data],*u128=[NSMutableData data];
  for(CBUUID *u in ad[CBAdvertisementDataServiceUUIDsKey]){NSData *b=uuidBytes(u);[(b.length==2?u16:u128) appendData:b];}
- if(u16.length)item(0x03,u16);
- if(u128.length)item(0x07,u128);
- // Service data: AD type 0x16 for a 16-bit UUID, 0x21 for a 128-bit one
+ // Service data first: it is what Nearby and Fast Pair look for. AD type 0x16 for a 16-bit
+ // UUID, 0x21 for a 128-bit one
  NSDictionary<CBUUID *,NSData *> *sd=ad[CBAdvertisementDataServiceDataKey];
  for(CBUUID *u in sd){NSData *ub=uuidBytes(u);NSMutableData *d=[NSMutableData dataWithData:ub];[d appendData:sd[u]];item(ub.length==2?0x16:0x21,d);}
+ if(u16.length)item(0x03,u16);
+ if(u128.length)item(0x07,u128);
  NSData *mfr=ad[CBAdvertisementDataManufacturerDataKey];if(mfr.length)item(0xff,mfr);
  NSNumber *tx=ad[CBAdvertisementDataTxPowerLevelKey];if(tx){int8_t t=tx.charValue;item(0x0a,[NSData dataWithBytes:&t length:1]);}
  NSString *name=ad[CBAdvertisementDataLocalNameKey]?:self.peripheral.name;
  if(name.length)item(0x09,[name dataUsingEncoding:NSUTF8StringEncoding]);
- NSMutableData *adv=[NSMutableData dataWithBytes:(uint8_t[]){2,1,6} length:3],*scan=[NSMutableData data];
- BOOL fits=YES;
- for(NSData *d in items){if(adv.length+d.length<=31)[adv appendData:d];else if(scan.length+d.length<=31)[scan appendData:d];else fits=NO;}
- if(!fits){   // one extended advertisement with everything
-  adv=[NSMutableData dataWithBytes:(uint8_t[]){2,1,6} length:3];scan=[NSMutableData data];
-  for(NSData *d in items)if(adv.length+d.length<=251)[adv appendData:d];
+ // Pack into advertisements of at most 31 bytes, each starting with the flags
+ NSMutableArray<NSMutableData *> *sets=[NSMutableArray array];
+ for(NSData *d in items){
+  NSMutableData *home=nil;
+  for(NSMutableData *a in sets)if(a.length+d.length<=31){home=a;break;}
+  if(!home){if(sets.count>=kMaxSets)continue;home=[NSMutableData dataWithBytes:(uint8_t[]){2,1,6} length:3];[sets addObject:home];}
+  [home appendData:d];   // an item over 28 bytes makes its set an extended one
  }
- if([adv isEqualToData:_advData?:[NSData data]]&&[scan isEqualToData:_scanData?:[NSData data]])return;
- BOOL first=_advData==nil;_advData=adv;_scanData=scan;
+ if(!sets.count)[sets addObject:[NSMutableData dataWithBytes:(uint8_t[]){2,1,6} length:3]];
+ NSData *all=[NSKeyedArchiver archivedDataWithRootObject:sets requiringSecureCoding:NO error:nil];
+ if([all isEqualToData:_advData?:[NSData data]])return;
+ BOOL first=_advData==nil;_advData=all;_sets=sets;
  if(_fd<0)return;
  BOOL connectable=[ad[CBAdvertisementDataIsConnectable] boolValue];
- if(!fits&&!_extended){
-  _extended=YES;first=YES;
-  GBLog(@"a device needs an extended advertisement (%lu bytes)",(unsigned long)adv.length);
-  if(_advertising||_conn>=0){
-   // Start over in extended mode (a connected twin finishes that first: tried again on update)
-   if(_conn>=0){_extended=NO;_advData=nil;return;}
-   _advertising=NO;
-   [self command:0x0c03 params:nil];
-   [self command:0x0c01 params:[NSData dataWithBytes:(uint8_t[]){0xff,0xff,0xff,0xff,0xff,0xff,0xbf,0x3d} length:8]];
-   [self command:0x2001 params:[NSData dataWithBytes:(uint8_t[]){0x1f,0x0a,0x02,0,0,0,0,0} length:8]];
-   [self command:0x2002 params:nil];
-  }
- }
- if(_extended){
+ if(sets.count==1&&sets[0].length<=31&&!_extended){
+  // One classic advertisement does it
   if(first){
-   // Set 0: connectable or not; scannable can't go with connectable here, and needn't
-   NSMutableData *p=[NSMutableData data];put8(p,0);put16(p,connectable?0x0001:0x0000);
-   uint8_t interval[3]={0xa0,0,0};[p appendBytes:interval length:3];[p appendBytes:interval length:3];
-   put8(p,7);put8(p,1);put8(p,0);[p appendBytes:(uint8_t[6]){0} length:6];put8(p,0);put8(p,0x7f);put8(p,1);put8(p,0);put8(p,1);put8(p,0);put8(p,0);
-   [self command:0x2036 params:p];
-   NSMutableData *r=[NSMutableData dataWithBytes:(uint8_t[]){0} length:1];[r appendData:[self address]];[self command:0x2035 params:r];
+   NSMutableData *p=[NSMutableData data];put16(p,0xa0);put16(p,0xa0);put8(p,connectable?0:3);put8(p,1);put8(p,0);[p appendBytes:(uint8_t[6]){0} length:6];put8(p,7);put8(p,0);
+   [self command:0x2006 params:p];
   }
-  NSMutableData *d=[NSMutableData data];put8(d,0);put8(d,3);put8(d,1);put8(d,(uint8_t)adv.length);[d appendData:adv];
-  [self command:0x2037 params:d];
+  NSMutableData *a=[NSMutableData data];put8(a,(uint8_t)sets[0].length);[a appendData:sets[0]];[a setLength:32];[self command:0x2008 params:a];
   [self advertise];
   return;
  }
- if(first){
-  // ADV_IND when Android may connect, else ADV_SCAN_IND (scannable) or ADV_NONCONN_IND
-  uint8_t type=connectable?0:(scan.length?2:3);
-  NSMutableData *p=[NSMutableData data];put16(p,0xa0);put16(p,0xa0);put8(p,type);put8(p,1);put8(p,0);[p appendBytes:(uint8_t[6]){0} length:6];put8(p,7);put8(p,0);
-  [self command:0x2006 params:p];
+ if(_conn>=0){_advData=nil;return;}   // a connected twin changes over after (on the next update)
+ if(!_extended){
+  // A controller takes one kind of advertising commands or the other until reset
+  _extended=YES;_advertising=NO;
+  GBLog(@"a device advertises %lu ways",(unsigned long)sets.count);
+  [self command:0x0c03 params:nil];
+  [self command:0x0c01 params:[NSData dataWithBytes:(uint8_t[]){0xff,0xff,0xff,0xff,0xff,0xff,0xbf,0x3d} length:8]];
+  [self command:0x2001 params:[NSData dataWithBytes:(uint8_t[]){0x1f,0x0a,0x02,0,0,0,0,0} length:8]];
+  [self command:0x2002 params:nil];
  }
- NSMutableData *a=[NSMutableData data];put8(a,(uint8_t)adv.length);[a appendData:adv];[a setLength:32];[self command:0x2008 params:a];
- NSMutableData *s=[NSMutableData data];put8(s,(uint8_t)scan.length);[s appendData:scan];[s setLength:32];[self command:0x2009 params:s];
+ // Start the sets over: stop them all and clear them (0x2039 with no sets disables all; 0x203D clears)
+ if(_advertising){[self command:0x2039 params:[NSData dataWithBytes:(uint8_t[]){0,0} length:2]];_advertising=NO;}
+ [self command:0x203d params:nil];
+ for(NSUInteger h=0;h<sets.count;h++){
+  NSData *a=sets[h];BOOL legacy=a.length<=31;
+  // Legacy PDUs: ADV_IND (0x13) if connectable, else ADV_NONCONN_IND (0x10); or extended (0x01/0x00)
+  uint16_t props=legacy?(connectable?0x0013:0x0010):(connectable?0x0001:0x0000);
+  NSMutableData *p=[NSMutableData data];put8(p,(uint8_t)h);put16(p,props);
+  uint8_t interval[3]={0xa0,0,0};[p appendBytes:interval length:3];[p appendBytes:interval length:3];
+  put8(p,7);put8(p,1);put8(p,0);[p appendBytes:(uint8_t[6]){0} length:6];put8(p,0);put8(p,0x7f);put8(p,1);put8(p,0);put8(p,1);put8(p,(uint8_t)h);put8(p,0);
+  [self command:0x2036 params:p];
+  NSMutableData *r=[NSMutableData data];put8(r,(uint8_t)h);[r appendData:[self address]];[self command:0x2035 params:r];
+  NSMutableData *d=[NSMutableData data];put8(d,(uint8_t)h);put8(d,3);put8(d,1);put8(d,(uint8_t)a.length);[d appendData:a];[self command:0x2037 params:d];
+ }
  [self advertise];
 }
 - (void)advertise {
  if(_advertising||_conn>=0||_fd<0||!_advData)return;
  _advertising=YES;
- if(_extended)[self command:0x2039 params:[NSData dataWithBytes:(uint8_t[]){1,1,0,0,0,0} length:6]];
- else [self command:0x200a params:[NSData dataWithBytes:(uint8_t[]){1} length:1]];
+ if(_extended){
+  NSMutableData *e=[NSMutableData data];put8(e,1);put8(e,(uint8_t)_sets.count);
+  for(NSUInteger h=0;h<_sets.count;h++){put8(e,(uint8_t)h);put16(e,0);put8(e,0);}
+  [self command:0x2039 params:e];
+ } else [self command:0x200a params:[NSData dataWithBytes:(uint8_t[]){1} length:1]];
 }
 
 #pragma mark L2CAP
@@ -413,7 +423,10 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 - (void)attRequest:(NSData *)pdu {
  if(!pdu.length)return;
  uint8_t op=((const uint8_t *)pdu.bytes)[0];
- if(op==0x1e)return;                                // confirmation of an indication
+ if(op==0x1e||op==0x1b)return;                     // a confirmation, or a notification from Android's own GATT server
+ // An indication from Android's own GATT server (Service Changed, say): the twin isn't
+ // subscribed to anything there, but it must confirm, or Android's ATT gives up on the link
+ if(op==0x1d){[self send:4 payload:[NSData dataWithBytes:(uint8_t[]){0x1e} length:1]];return;}
  if(op==0x52||op==0xd2){[self attHandle:pdu];return;} // write command: no reply, never waits
  [_attQueue addObject:pdu];[self nextAtt];
 }
@@ -732,6 +745,7 @@ static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
  return [ad[CBAdvertisementDataLocalNameKey] length]||p.name.length||[ad[CBAdvertisementDataServiceUUIDsKey] count]||[ad[CBAdvertisementDataServiceDataKey] count]||m.length>=2;
 }
 - (void)centralManager:(CBCentralManager *)c didDiscoverPeripheral:(CBPeripheral *)p advertisementData:(NSDictionary *)ad RSSI:(NSNumber *)rssi {
+ [self tallyNearby:ad peripheral:p rssi:rssi];
  GBMirror *m=self.mirrors[p.identifier];
  if(!m){
   if(!worthRelaying(ad,p,self.phones))return;
@@ -758,7 +772,22 @@ static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
  }
  m.lastSeen=CFAbsoluteTimeGetCurrent();
 }
+// What macOS hears of Google's Nearby and Quick Share beacons, summed up every 10 s (no names)
+- (void)tallyNearby:(NSDictionary *)ad peripheral:(CBPeripheral *)p rssi:(NSNumber *)rssi {
+ static NSArray<CBUUID *> *google;
+ if(!google)google=@[[CBUUID UUIDWithString:@"FEF3"],[CBUUID UUIDWithString:@"FCF1"],[CBUUID UUIDWithString:@"FE9F"],[CBUUID UUIDWithString:@"FE2C"]];
+ for(CBUUID *u in google){
+  NSData *d=ad[CBAdvertisementDataServiceDataKey][u];
+  if(!d&&![ad[CBAdvertisementDataServiceUUIDsKey] containsObject:u])continue;
+  NSString *k=[NSString stringWithFormat:@"%@ %lu bytes%@ %@",u.UUIDString,(unsigned long)d.length,[ad[CBAdvertisementDataIsConnectable] boolValue]?@" connectable":@"",
+               self.mirrors[p.identifier]?@"relayed":@"NOT relayed"];
+  if(!self.tally)self.tally=[NSMutableDictionary dictionary];
+  NSMutableSet *ids=self.tally[k]?:[NSMutableSet set];[ids addObject:p.identifier];self.tally[k]=ids;
+ }
+}
 - (void)forgetStale {
+ for(NSString *k in self.tally)GBLog(@"heard: %@ from %lu devices",k,(unsigned long)[self.tally[k] count]);
+ [self.tally removeAllObjects];
  NSTimeInterval now=CFAbsoluteTimeGetCurrent();
  for(NSUUID *k in self.mirrors.allKeys){GBMirror *m=self.mirrors[k];if(m.connected||now-m.lastSeen<kForgetAfter)continue;[m close];[self.mirrors removeObjectForKey:k];}
 }

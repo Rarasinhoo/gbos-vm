@@ -8,8 +8,8 @@ from pathlib import Path
 
 _cwd_lock = threading.Lock()  # the working directory is process-wide
 # What the guest's control service accepts (image/guest_host_control.sh), besides VM_TOKEN and
-# VM_DENSITY NNN; the last four only print diagnostics into serial.log.
-VERBS = ('VM_POWEROFF', 'VM_STATUS', 'VM_LOG', 'VM_TOP', 'VM_NEARBY')
+# VM_DENSITY NNN and VM_TAP X Y; the rest are for testing and diagnosis (they print into serial.log).
+VERBS = ('VM_POWEROFF', 'VM_STATUS', 'VM_LOG', 'VM_TOP', 'VM_NEARBY', 'VM_QUICKSHARE', 'VM_UI')
 
 
 def send(run_dir, verb):
@@ -26,6 +26,6 @@ def send(run_dir, verb):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 3 or not (sys.argv[2] in VERBS or re.fullmatch(r'VM_DENSITY [0-9]{3}', sys.argv[2])):
-        sys.exit('usage: vm_control.py RUN_DIR ' + '|'.join(VERBS + ('VM_DENSITY NNN',)))
+    if len(sys.argv) != 3 or not (sys.argv[2] in VERBS or re.fullmatch(r'VM_DENSITY [0-9]{3}|VM_TAP [0-9]{1,4} [0-9]{1,4}', sys.argv[2])):
+        sys.exit('usage: vm_control.py RUN_DIR ' + '|'.join(VERBS + ('VM_DENSITY NNN', 'VM_TAP X Y')))
     send(sys.argv[1], sys.argv[2])
