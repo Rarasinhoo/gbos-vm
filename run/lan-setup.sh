@@ -9,20 +9,26 @@
 # The service follows the Mac's network: when Wi-Fi reconnects, or the Mac moves between Wi-Fi
 # and Ethernet, it bridges again (vmnet keeps a dead link otherwise), and the VM reconnects.
 #
-#   sudo run/lan-setup.sh            install or update
-#   sudo run/lan-setup.sh --remove   uninstall
+#   sudo run/lan-setup.sh                       install or update (socket_vmnet from Homebrew)
+#   sudo run/lan-setup.sh --vmnet PATH          install or update with that socket_vmnet (the app's own)
+#   sudo run/lan-setup.sh --remove              uninstall
 set -euo pipefail
-VERSION=2   # the app compares this with the installed service's, to offer an update
+VERSION=3   # the app compares this with the installed service's, to offer an update
 LABEL=local.googlebook.lan
 PLIST=/Library/LaunchDaemons/$LABEL.plist
 DIR="/Library/Application Support/Googlebook VM"
-SOCK=/opt/homebrew/var/run/googlebook-lan.sock
+SOCK=/var/run/googlebook-lan.sock
+OLD_SOCK=/opt/homebrew/var/run/googlebook-lan.sock   # versions 1 and 2
 [ "$(id -u)" = 0 ] || { echo "Run it with sudo: sudo $0 $*" >&2; exit 1; }
 launchctl bootout system "$PLIST" 2>/dev/null || true
+rm -f "$OLD_SOCK"
 if [ "${1:-}" = --remove ]; then rm -rf "$PLIST" "$SOCK" "$DIR"; echo "Removed."; exit 0; fi
-BIN=/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet
-[ -x "$BIN" ] || { echo "socket_vmnet isn't installed (./prereqs.sh installs it, or: brew install socket_vmnet)" >&2; exit 1; }
-mkdir -p "$DIR" "$(dirname "$SOCK")"
+SRC=/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet
+[ "${1:-}" = --vmnet ] && SRC="$2"
+[ -x "$SRC" ] || { echo "socket_vmnet isn't installed (./prereqs.sh installs it, or: brew install socket_vmnet)" >&2; exit 1; }
+mkdir -p "$DIR"
+# Root runs it, so it runs a copy only root can change
+BIN="$DIR/socket_vmnet"; cp "$SRC" "$BIN.new" && mv -f "$BIN.new" "$BIN"
 # Root runs this, so it lives where only root can change it
 cat >"$DIR/lan-bridge.sh" <<EOF
 #!/bin/bash

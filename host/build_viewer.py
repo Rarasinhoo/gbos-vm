@@ -16,11 +16,13 @@ for p in (app / 'MacOS', app / 'Resources', build / 'modules', build / 'module-c
 shader = (S / 'CocoaSpiceRenderer/CSShaders.metal').read_text().replace(
     '#import "include/CSShaderTypes.h"', (S / 'CocoaSpiceRenderer/include/CSShaderTypes.h').read_text())
 (app / 'Resources/VMShaders.metal').write_text(shader)
-for name in ('run_vm.py', 'vm_control.py', 'lan-setup.sh', 'storage.py'):
+for name in ('run_vm.py', 'vm_control.py', 'lan-setup.sh', 'storage.py', 'setup.py'):
     shutil.copyfile(run_scripts / name, app / 'Resources' / name)
 (app / 'Info.plist').write_bytes(plistlib.dumps({
     'CFBundleIdentifier': 'local.googlebook.viewer', 'CFBundleName': 'Googlebook VM', 'GBOSWork': str(work),
     'CFBundleExecutable': 'GooglebookViewer', 'CFBundlePackageType': 'APPL', 'NSHighResolutionCapable': True,
+    'CFBundleShortVersionString': os.environ.get('GBOS_VERSION', 'dev'), 'CFBundleVersion': os.environ.get('GBOS_VERSION', 'dev'),
+    'LSMinimumSystemVersion': '26.0', 'LSApplicationCategoryType': 'public.app-category.utilities',
     'NSCameraUsageDescription': 'Android in the VM uses this Mac’s camera as a USB webcam. '
                                 'It only runs while an Android app is using the camera.',
     'NSMicrophoneUsageDescription': 'Android in the VM uses this Mac’s microphone as a USB microphone. '
@@ -41,8 +43,9 @@ cmd += sources
 for n in ('AppKit', 'Metal', 'MetalKit', 'CoreGraphics', 'CoreImage', 'IOSurface', 'CoreVideo', 'IOKit',
           'AVFoundation', 'CoreMedia', 'ImageIO', 'CoreBluetooth', 'ApplicationServices', 'Carbon'):
     cmd += ['-framework', n]
+# Weakly: the downloadable app starts without them (setup fetches UTM) and loads them after
 for n in ('spice-client-glib-2.0.8', 'glib-2.0.0', 'gobject-2.0.0', 'gio-2.0.0', 'gstreamer-1.0.0'):
-    cmd.append(str(frameworks / (n + '.framework') / n))
+    cmd.append('-Wl,-weak_library,' + str(frameworks / (n + '.framework') / n))
 # Second rpath: relative to the app, so the whole work folder can be moved or copied elsewhere.
 cmd += ['-Wl,-rpath,' + str(frameworks), '-Wl,-rpath,@executable_path/../../../../UTM-beta/UTM.app/Contents/Frameworks',
         '-o', str(app / 'MacOS/GooglebookViewer')]

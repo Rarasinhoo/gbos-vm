@@ -15,6 +15,29 @@
 #import <CommonCrypto/CommonHMAC.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
+#import <dlfcn.h>
+#import <mach-o/dyld.h>
+
+// The downloadable app carries the VM engine in Resources/runtime, its own Python included (a Mac
+// without Xcode's tools has no usable python3); a build from source uses the system's.
+static NSString *bundledPython(void) {
+ NSString *p=[NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"runtime/python/bin/python3"];
+ return [[NSFileManager defaultManager] isExecutableFileAtPath:p]?p:@"/usr/bin/python3";
+}
+static BOOL isDownloadedApp(void) {return [[NSFileManager defaultManager] fileExistsAtPath:[NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"runtime/manifest.json"]];}
+// Where the VM lives: GOOGLEBOOK_WORK; a build from source sits in its work folder
+// (WORK/host/Googlebook VM.app) or recorded it; the downloadable app keeps it in Application Support.
+static NSString *workFolder(void) {
+ const char *e=getenv("GOOGLEBOOK_WORK");if(e&&*e)return @(e);
+ NSBundle *b=NSBundle.mainBundle;
+ NSString *beside=[[b.bundlePath stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
+ if([[NSFileManager defaultManager] fileExistsAtPath:[beside stringByAppendingPathComponent:@"image/googlebook.raw"]])return beside;
+ NSString *recorded=[b objectForInfoDictionaryKey:@"GBOSWork"];if(recorded.length)return recorded;
+ return [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,NSUserDomainMask,YES).firstObject stringByAppendingPathComponent:@"Googlebook VM"];
+}
+// The SPICE libraries come from UTM, which setup downloads (nothing of UTM's is redistributed):
+// the app links them weakly, so it starts without them, and loaded only when they're there.
+static BOOL spiceLoaded(void) {return dlsym(RTLD_DEFAULT,"spice_session_new")!=NULL;}
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/sysctl.h>
@@ -260,6 +283,13 @@ static unsigned short scan[128] = {
 @property(nonatomic) CFMachPortRef swipeTap;
 @property(nonatomic,strong) NSString *runDir;
 @property(nonatomic,strong) NSString *workDir;
+@property(nonatomic,strong) NSWindow *setupWindow;
+@property(nonatomic,strong) NSTextField *setupTitle, *setupStep, *setupDetail;
+@property(nonatomic,strong) NSProgressIndicator *setupBar;
+@property(nonatomic,strong) NSButton *setupButton, *setupSecond;
+@property(nonatomic,strong) NSTask *setupTask;
+@property(nonatomic,strong) NSMutableString *setupOut;
+@property(nonatomic,strong) id<NSObject> setupActivity;
 @property(nonatomic) BOOL backupDropped, storageWarned;
 @property(nonatomic) BOOL quitting;
 @property(nonatomic) BOOL restarting;
@@ -334,6 +364,8 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   // Settings offers two networks now; the isolated and offline ones remain run_vm.py options
   if(![@[@"full",@"lan"] containsObject:[u stringForKey:@"Network"]?:@"full"])[u removeObjectForKey:@"Network"];}
  [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@YES,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES}];
+ // The downloadable app sets itself up first (and after an update), before anything uses SPICE
+ if(!self.socketPath&&isDownloadedApp()&&(!spiceLoaded()||![self setupReady])){[self showSetup];return;}
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
@@ -407,13 +439,8 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 - (void)startVM {
  NSBundle *b=NSBundle.mainBundle;NSUserDefaults *d=[NSUserDefaults standardUserDefaults];
  if([[d stringForKey:@"Network"] isEqualToString:@"lan"]&&![self setUpNetworkBridge])[d setObject:@"full" forKey:@"Network"];
- const char *e=getenv("GOOGLEBOOK_WORK");NSString *work=e?@(e):[b objectForInfoDictionaryKey:@"GBOSWork"];
+ NSString *work=workFolder();
  NSString *runner=[b pathForResource:@"run_vm" ofType:@"py"];
- // Prefer the folder this app sits in (WORK/host/Googlebook VM.app), so a work folder that was
- // moved or copied to another Mac keeps working; fall back to the path recorded at build time
- // for an app that was copied out on its own (to /Applications, say).
- NSString *beside=[[b.bundlePath stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
- if(!e&&[[NSFileManager defaultManager] fileExistsAtPath:[beside stringByAppendingPathComponent:@"image/googlebook.raw"]])work=beside;
  if(!work||!runner||![[NSFileManager defaultManager] fileExistsAtPath:[work stringByAppendingPathComponent:@"image/googlebook.raw"]]){
   [self fail:[NSString stringWithFormat:@"No VM image at %@/image. Run install.sh first, or rebuild the app if you moved the folder.",work?:@"(unknown)"]];return;}
  self.workDir=work;
@@ -459,7 +486,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  if([d boolForKey:@"Bluetooth"])[args addObject:@"--bluetooth"];
  // Pace the guest to the screen the window opens on (see guest_refresh in run_vm.py).
  [args addObjectsFromArray:@[@"--host-refresh",[NSString stringWithFormat:@"%g",screenRefresh(self.window.screen?:NSScreen.mainScreen)]]];
- NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];[args insertObject:@"-I" atIndex:0];t.arguments=args;
+ NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:bundledPython()];[args insertObject:@"-I" atIndex:0];t.arguments=args;
  t.standardOutput=[NSFileHandle fileHandleWithNullDevice];t.standardError=[NSFileHandle fileHandleWithNullDevice];
  __weak App *weak=self;
  t.terminationHandler=^(NSTask *x){dispatch_async(dispatch_get_main_queue(),^{
@@ -507,16 +534,103 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
   if(log&&[[[NSString alloc] initWithData:log encoding:NSISOLatin1StringEncoding] rangeOfString:@"(^|\n)VM_BOOT_COMPLETED" options:NSRegularExpressionSearch].location!=NSNotFound){
    self.densitySent=YES;
    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-    NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
+    NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:bundledPython()];
     c.arguments=@[@"-I",[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,[NSString stringWithFormat:@"VM_DENSITY %ld",(long)self.guestDensity]];
     [c launchAndReturnError:nil];});
   }
  }];
 }
+// --- Setup (the downloadable app) ---------------------------------------------------------------
+// One window for people who have never used a terminal: what will happen, then a progress bar
+// through run/setup.py's steps, and plain words if something goes wrong (Try Again resumes).
+- (BOOL)setupReady {
+ NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:bundledPython()];
+ t.arguments=@[@"-I",[NSBundle.mainBundle pathForResource:@"setup" ofType:@"py"],workFolder(),@"--check"];
+ t.standardOutput=t.standardError=[NSFileHandle fileHandleWithNullDevice];
+ if(![t launchAndReturnError:nil])return NO;[t waitUntilExit];return t.terminationStatus==0;
+}
+- (NSTextField *)setupLabel:(NSString *)text size:(CGFloat)size bold:(BOOL)bold {
+ NSTextField *l=[NSTextField wrappingLabelWithString:text];l.font=bold?[NSFont boldSystemFontOfSize:size]:[NSFont systemFontOfSize:size];
+ l.selectable=NO;l.translatesAutoresizingMaskIntoConstraints=NO;return l;
+}
+- (void)showSetup {
+ BOOL fresh=![[NSFileManager defaultManager] fileExistsAtPath:[workFolder() stringByAppendingPathComponent:@"image/googlebook.raw"]];
+ NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,330) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
+ w.title=@"Googlebook VM";w.delegate=self;w.releasedWhenClosed=NO;
+ NSImageView *icon=[NSImageView imageViewWithImage:NSApp.applicationIconImage];icon.translatesAutoresizingMaskIntoConstraints=NO;
+ self.setupTitle=[self setupLabel:fresh?@"Welcome to Googlebook VM":@"Googlebook VM was updated" size:20 bold:YES];
+ self.setupStep=[self setupLabel:fresh?@"Googlebook OS is Google's Android for laptops. To run it on this Mac, Googlebook VM downloads it from Google (about 9 GB) and prepares it for your Mac.\n\nIt takes 15 to 45 minutes, depending on your internet connection, and needs about 45 GB of free disk space. You can keep using your Mac in the meantime.":@"It needs a few minutes to update Android's system. Your apps and files stay as they are." size:13 bold:NO];
+ self.setupDetail=[self setupLabel:@"" size:11 bold:NO];self.setupDetail.textColor=NSColor.secondaryLabelColor;
+ self.setupBar=[NSProgressIndicator new];self.setupBar.indeterminate=NO;self.setupBar.minValue=0;self.setupBar.maxValue=1;self.setupBar.hidden=YES;self.setupBar.translatesAutoresizingMaskIntoConstraints=NO;
+ self.setupButton=[NSButton buttonWithTitle:fresh?@"Set Up":@"Update" target:self action:@selector(setupPressed:)];self.setupButton.keyEquivalent=@"\r";
+ self.setupSecond=[NSButton buttonWithTitle:@"Quit" target:NSApp action:@selector(terminate:)];
+ for(NSButton *b in @[self.setupButton,self.setupSecond])b.translatesAutoresizingMaskIntoConstraints=NO;
+ NSView *c=w.contentView;for(NSView *v in @[icon,self.setupTitle,self.setupStep,self.setupBar,self.setupDetail,self.setupButton,self.setupSecond])[c addSubview:v];
+ [NSLayoutConstraint activateConstraints:@[
+  [icon.topAnchor constraintEqualToAnchor:c.topAnchor constant:24],[icon.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:24],
+  [icon.widthAnchor constraintEqualToConstant:64],[icon.heightAnchor constraintEqualToConstant:64],
+  [self.setupTitle.topAnchor constraintEqualToAnchor:c.topAnchor constant:28],[self.setupTitle.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:16],
+  [self.setupTitle.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-24],
+  [self.setupStep.topAnchor constraintEqualToAnchor:self.setupTitle.bottomAnchor constant:10],[self.setupStep.leadingAnchor constraintEqualToAnchor:self.setupTitle.leadingAnchor],
+  [self.setupStep.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-24],
+  [self.setupBar.topAnchor constraintEqualToAnchor:self.setupStep.bottomAnchor constant:16],[self.setupBar.leadingAnchor constraintEqualToAnchor:self.setupTitle.leadingAnchor],
+  [self.setupBar.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-24],
+  [self.setupDetail.topAnchor constraintEqualToAnchor:self.setupBar.bottomAnchor constant:6],[self.setupDetail.leadingAnchor constraintEqualToAnchor:self.setupTitle.leadingAnchor],
+  [self.setupDetail.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-24],
+  [self.setupButton.bottomAnchor constraintEqualToAnchor:c.bottomAnchor constant:-20],[self.setupButton.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-24],
+  [self.setupSecond.bottomAnchor constraintEqualToAnchor:c.bottomAnchor constant:-20],[self.setupSecond.trailingAnchor constraintEqualToAnchor:self.setupButton.leadingAnchor constant:-12]]];
+ self.setupWindow=w;[w center];[w makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];
+ if(!fresh)[self setupPressed:nil];   // an update needs no decision
+}
+- (void)setupPressed:(id)sender {
+ if(self.setupTask)return;
+ self.setupButton.enabled=NO;self.setupSecond.title=@"Stop";self.setupSecond.action=@selector(stopSetup:);self.setupSecond.target=self;
+ self.setupBar.hidden=NO;self.setupBar.doubleValue=0;self.setupDetail.stringValue=@"Starting…";
+ // Keep the Mac awake for the downloads (the display may still sleep)
+ self.setupActivity=[[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated reason:@"Setting up Googlebook VM"];
+ NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:bundledPython()];
+ t.arguments=@[@"-I",@"-u",[NSBundle.mainBundle pathForResource:@"setup" ofType:@"py"],workFolder()];
+ NSPipe *p=[NSPipe pipe];t.standardOutput=p;t.standardError=[NSFileHandle fileHandleWithNullDevice];self.setupOut=[NSMutableString string];
+ __weak App *weak=self;
+ p.fileHandleForReading.readabilityHandler=^(NSFileHandle *h){NSData *d=h.availableData;if(!d.length){h.readabilityHandler=nil;return;}
+  NSString *s=[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]?:@"";
+  dispatch_async(dispatch_get_main_queue(),^{[weak setupText:s];});};
+ t.terminationHandler=^(NSTask *x){dispatch_async(dispatch_get_main_queue(),^{[weak setupEnded:x.terminationStatus];});};
+ self.setupTask=t;
+ if(![t launchAndReturnError:nil]){self.setupTask=nil;[self setupFailed:@"Googlebook VM couldn't start its setup. Try downloading the app again."];}
+}
+- (void)setupText:(NSString *)s {
+ [self.setupOut appendString:s];NSRange nl;
+ while((nl=[self.setupOut rangeOfString:@"\n"]).location!=NSNotFound){
+  NSString *line=[self.setupOut substringToIndex:nl.location];[self.setupOut deleteCharactersInRange:NSMakeRange(0,nl.location+1)];
+  NSArray<NSString *> *w=[line componentsSeparatedByString:@" "];
+  if([line hasPrefix:@"@step "]&&w.count>3){self.setupTitle.stringValue=[[w subarrayWithRange:NSMakeRange(3,w.count-3)] componentsJoinedByString:@" "];
+   self.setupStep.stringValue=[NSString stringWithFormat:@"Step %@ of %@",w[1],w[2]];self.setupBar.doubleValue=0;self.setupDetail.stringValue=@"";}
+  else if([line hasPrefix:@"@progress "]&&w.count>1){self.setupBar.doubleValue=w[1].doubleValue;
+   if(w.count>2)self.setupDetail.stringValue=[[w subarrayWithRange:NSMakeRange(2,w.count-2)] componentsJoinedByString:@" "];}
+  else if([line hasPrefix:@"@error "])[self setupFailed:[[line substringFromIndex:7] stringByReplacingOccurrencesOfString:@" ⏎ " withString:@"\n"]];
+  else if([line isEqualToString:@"@done"]){self.setupTitle.stringValue=@"Googlebook OS is ready";self.setupStep.stringValue=@"Starting it now…";self.setupBar.doubleValue=1;self.setupDetail.stringValue=@"";}
+ }
+}
+- (void)setupFailed:(NSString *)message {
+ self.setupTitle.stringValue=@"Setup didn't finish";self.setupStep.stringValue=message;self.setupBar.hidden=YES;self.setupDetail.stringValue=@"Nothing is lost: Try Again picks up where it stopped.";
+ self.setupButton.title=@"Try Again";self.setupButton.enabled=YES;self.setupSecond.title=@"Quit";self.setupSecond.target=NSApp;self.setupSecond.action=@selector(terminate:);
+}
+- (void)stopSetup:(id)sender {[self.setupTask terminate];}
+- (void)setupEnded:(int)status {
+ BOOL ok=status==0&&[self.setupTitle.stringValue isEqualToString:@"Googlebook OS is ready"];self.setupTask=nil;
+ [[NSProcessInfo processInfo] endActivity:self.setupActivity];self.setupActivity=nil;
+ if(!ok){if(self.setupButton.enabled)return;   // the error is showing already
+  [self setupFailed:status==15?@"You stopped the setup.":@"The setup stopped unexpectedly."];return;}
+ // A fresh start loads the graphics libraries setup just fetched, and boots Android
+ NSTask *o=[NSTask new];o.executableURL=[NSURL fileURLWithPath:@"/bin/sh"];
+ o.arguments=@[@"-c",@"sleep 1; exec /usr/bin/open -n \"$0\"",NSBundle.mainBundle.bundlePath];[o launchAndReturnError:nil];
+ [NSApp terminate:nil];
+}
 // run/storage.py: Android's storage size, or a fresh one of a new size. Its output, or nil if it failed.
 - (NSString *)storage:(NSArray<NSString *> *)args {
  NSString *script=[NSBundle.mainBundle pathForResource:@"storage" ofType:@"py"];if(!script||!self.workDir)return nil;
- NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];t.arguments=[@[@"-I",script,self.workDir] arrayByAddingObjectsFromArray:args];
+ NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:bundledPython()];t.arguments=[@[@"-I",script,self.workDir] arrayByAddingObjectsFromArray:args];
  NSPipe *p=[NSPipe pipe];t.standardOutput=p;t.standardError=[NSFileHandle fileHandleWithNullDevice];
  if(![t launchAndReturnError:nil])return nil;
  NSData *o=[p.fileHandleForReading readDataToEndOfFile];[t waitUntilExit];
@@ -537,6 +651,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
 }
 - (void)restartVM:(id)sender {if(self.vmTask){self.restarting=YES;[NSApp terminate:nil];}}
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+ [self.setupTask terminate];   // setup resumes where it stopped, next time
  if(!self.vmTask||!self.vmTask.running)return NSTerminateNow;
  self.quitting=YES;self.window.subtitle=self.restarting?@"Restarting: shutting Android down…":@"Shutting Android down…";[self.view releaseCapture];[self.vmTask terminate];
  return NSTerminateLater;
@@ -620,7 +735,7 @@ static void batteryChanged(void *context) {[(__bridge App *)context sendBattery]
 // "Same network as this Mac" needs a small root service (socket_vmnet, see run/lan-setup.sh):
 // macOS lets only root attach a VM to a network interface. Installed once, with the usual macOS
 // password prompt. YES when it's there.
-static NSString *const kBridgeSocket=@"/opt/homebrew/var/run/googlebook-lan.sock";
+static NSString *const kBridgeSocket=@"/var/run/googlebook-lan.sock";
 static int bridgeVersion(NSString *path) {
  NSString *t=[NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
  NSTextCheckingResult *m=[[NSRegularExpression regularExpressionWithPattern:@"(?:VERSION=|version )([0-9]+)" options:0 error:nil] firstMatchInString:t?:@"" options:0 range:NSMakeRange(0,t.length)];
@@ -629,7 +744,7 @@ static int bridgeVersion(NSString *path) {
 - (BOOL)setUpNetworkBridge {
  NSString *script=[NSBundle.mainBundle pathForResource:@"lan-setup" ofType:@"sh"];
  int installed=bridgeVersion(@"/Library/Application Support/Googlebook VM/lan-bridge.sh");
- BOOL present=[[NSFileManager defaultManager] fileExistsAtPath:kBridgeSocket];
+ BOOL present=[[NSFileManager defaultManager] fileExistsAtPath:kBridgeSocket]||[[NSFileManager defaultManager] fileExistsAtPath:@"/opt/homebrew/var/run/googlebook-lan.sock"];
  if(present&&installed>=bridgeVersion(script))return YES;
  NSAlert *a=[NSAlert new];
  a.messageText=present?@"Update the network service?":@"Put Android on this Mac's network?";
@@ -637,7 +752,10 @@ static int bridgeVersion(NSString *path) {
                            @"Android then joins your Wi-Fi as one more device, so your phone can find it. Googlebook VM installs a small network service for this, once; macOS will ask for your password.";
  [a addButtonWithTitle:@"Install"];[a addButtonWithTitle:@"Cancel"];
  if([a runModal]!=NSAlertFirstButtonReturn)return NO;
- NSString *src=[NSString stringWithFormat:@"do shell script \"/bin/bash \" & quoted form of \"%@\" with administrator privileges",script];
+ // The downloadable app brings its own socket_vmnet; a build from source uses Homebrew's
+ NSString *vmnet=[NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"runtime/tools/socket_vmnet"];
+ NSString *extra=[[NSFileManager defaultManager] isExecutableFileAtPath:vmnet]?[NSString stringWithFormat:@" & \" --vmnet \" & quoted form of \"%@\"",vmnet]:@"";
+ NSString *src=[NSString stringWithFormat:@"do shell script \"/bin/bash \" & quoted form of \"%@\"%@ with administrator privileges",script,extra];
  NSDictionary *err=nil;NSAppleEventDescriptor *r=[[[NSAppleScript alloc] initWithSource:src] executeAndReturnError:&err];
  if(r&&[[NSFileManager defaultManager] fileExistsAtPath:kBridgeSocket])return YES;
  if([err[NSAppleScriptErrorNumber] intValue]==-128)return present;   // cancelled: an old service still works
@@ -840,7 +958,7 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
   VMView *v=weak.view;if(v.inside&&!v.locked){v.inside=NO;[v setHostCursorHidden:NO];v.sendLine(@"X");}}];
 }
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender{return NO;}
-- (void)windowWillClose:(NSNotification *)n{if(n.object==self.window)[NSApp terminate:nil];}
+- (void)windowWillClose:(NSNotification *)n{if(n.object==self.window||(n.object==self.setupWindow&&!self.window))[NSApp terminate:nil];}
 - (void)applicationWillTerminate:(NSNotification *)n{[self.bluetooth stop];[self.view releaseCapture];[self.connection disconnect];}
 - (void)spiceConnected:(CSConnection *)c{fprintf(stderr,"SPICE connected\n");}
 - (void)spiceDisconnected:(CSConnection *)c{dispatch_async(dispatch_get_main_queue(),^{[self.view releaseCapture];self.window.subtitle=@"VM disconnected";});}
@@ -856,6 +974,14 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
 - (void)spiceForwardedPortClosed:(CSConnection *)c port:(CSPort *)p{}
 @end
 int main(int argc,char **argv){@autoreleasepool {
+ // The downloadable app finds UTM's libraries in its work folder: start over with them in reach
+ if(!spiceLoaded()&&!getenv("GBOS_REEXEC")){
+  NSString *fw=[workFolder() stringByAppendingPathComponent:@"UTM-beta/UTM.app/Contents/Frameworks"];
+  char exe[PATH_MAX];uint32_t size=sizeof exe;
+  if([[NSFileManager defaultManager] fileExistsAtPath:fw]&&!_NSGetExecutablePath(exe,&size)){
+   setenv("DYLD_FRAMEWORK_PATH",fw.fileSystemRepresentation,1);setenv("GBOS_REEXEC","1",1);execv(exe,argv);}
+ }
+ unsetenv("GBOS_REEXEC");
  if(argc>3){fprintf(stderr,"Usage: GooglebookViewer [/absolute/path/to/spice.sock [--fullscreen]]\n");return 2;}
  NSApplication *app=[NSApplication sharedApplication];[app setActivationPolicy:NSApplicationActivationPolicyRegular];
  // Menu bar. Actions have no target, so they reach the app delegate through the responder chain.

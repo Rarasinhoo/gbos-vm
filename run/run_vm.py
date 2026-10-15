@@ -52,7 +52,7 @@ CMDLINE = ('console=ttyAMA0,115200 earlycon=pl011,0x9000000 panic=0 root=/dev/ra
            'androidboot.vendor.apex.com.android.hardware.audio.desktop=none loglevel=3')
 
 
-LAN_SOCKET = '/opt/homebrew/var/run/googlebook-lan.sock'   # run/lan-setup.sh
+LAN_SOCKET = '/var/run/googlebook-lan.sock'   # run/lan-setup.sh
 
 
 def mac_lan_address():

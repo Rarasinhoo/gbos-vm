@@ -114,3 +114,13 @@ find_build_python() {
     fi
   done
 }
+
+# What the system part is made from: this repository's image, guest and tool sources, the guest
+# binaries just built, and the image flags. Unchanged since the disk was last brought up to date,
+# there is nothing to rebuild (update-image.sh stops after the app; the downloadable app's setup
+# compares it too).
+system_inputs() {
+  { cd "$ROOT" && git ls-files -co --exclude-standard -- image guest tools tools-src patches '*.sh' | LC_ALL=C sort | while read -r f; do if [ -f "$f" ]; then printf "%s " "$f"; shasum -a 256 <"$f"; fi; done
+    find "$WORK/guest" -type f -print0 2>/dev/null | LC_ALL=C sort -z | xargs -0 shasum -a 256
+    echo "flags ${GBOS_IMAGE_FLAGS:-}"; } | shasum -a 256 | cut -d' ' -f1
+}
