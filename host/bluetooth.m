@@ -123,7 +123,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
  NSUInteger _l2capWant;
  uint16_t _mtu;
  NSData *_advData, *_scanData;
- BOOL _advertising;
+ BOOL _advertising, _extended;
  NSMutableArray<GBAttr *> *_attrs;       // nil until the real device's database is discovered
  NSUInteger _discovering;
  NSMutableArray<NSData *> *_attQueue;    // requests from Android waiting for the database or a reply
@@ -238,31 +238,67 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 
 #pragma mark Advertising
 
-// What CoreBluetooth heard, as advertising data: what fits in the advertisement itself, the rest
-// in the scan response (CoreBluetooth reports both together).
+// What CoreBluetooth heard, as advertising data. In a classic (legacy) advertisement when it
+// fits, the rest in its scan response (CoreBluetooth reports both together); otherwise in one
+// extended advertisement of up to 251 bytes, as Nearby's beacons often need. A controller
+// takes one kind or the other until it is reset, so a twin that outgrows the classic one is
+// reset and starts over extended.
 - (void)updateAdvertisement:(NSDictionary *)ad {
  self.advertisement=ad;
  NSMutableArray<NSData *> *items=[NSMutableArray array];
- void (^item)(uint8_t,NSData *)=^(uint8_t type,NSData *v){if(v.length>29)v=[v subdataWithRange:NSMakeRange(0,29)];
+ void (^item)(uint8_t,NSData *)=^(uint8_t type,NSData *v){if(v.length>240)v=[v subdataWithRange:NSMakeRange(0,240)];
   NSMutableData *d=[NSMutableData data];put8(d,(uint8_t)v.length+1);put8(d,type);[d appendData:v];[items addObject:d];};
  NSMutableData *u16=[NSMutableData data],*u128=[NSMutableData data];
  for(CBUUID *u in ad[CBAdvertisementDataServiceUUIDsKey]){NSData *b=uuidBytes(u);[(b.length==2?u16:u128) appendData:b];}
  if(u16.length)item(0x03,u16);
  if(u128.length)item(0x07,u128);
+ // Service data: AD type 0x16 for a 16-bit UUID, 0x21 for a 128-bit one
  NSDictionary<CBUUID *,NSData *> *sd=ad[CBAdvertisementDataServiceDataKey];
- for(CBUUID *u in sd){NSMutableData *d=[NSMutableData dataWithData:uuidBytes(u)];[d appendData:sd[u]];item(d.length>16+2?0x21:(uuidBytes(u).length==2?0x16:0x21),d);}
+ for(CBUUID *u in sd){NSData *ub=uuidBytes(u);NSMutableData *d=[NSMutableData dataWithData:ub];[d appendData:sd[u]];item(ub.length==2?0x16:0x21,d);}
  NSData *mfr=ad[CBAdvertisementDataManufacturerDataKey];if(mfr.length)item(0xff,mfr);
  NSNumber *tx=ad[CBAdvertisementDataTxPowerLevelKey];if(tx){int8_t t=tx.charValue;item(0x0a,[NSData dataWithBytes:&t length:1]);}
  NSString *name=ad[CBAdvertisementDataLocalNameKey]?:self.peripheral.name;
  if(name.length)item(0x09,[name dataUsingEncoding:NSUTF8StringEncoding]);
  NSMutableData *adv=[NSMutableData dataWithBytes:(uint8_t[]){2,1,6} length:3],*scan=[NSMutableData data];
- for(NSData *d in items){if(adv.length+d.length<=31)[adv appendData:d];else if(scan.length+d.length<=31)[scan appendData:d];}
+ BOOL fits=YES;
+ for(NSData *d in items){if(adv.length+d.length<=31)[adv appendData:d];else if(scan.length+d.length<=31)[scan appendData:d];else fits=NO;}
+ if(!fits){   // one extended advertisement with everything
+  adv=[NSMutableData dataWithBytes:(uint8_t[]){2,1,6} length:3];scan=[NSMutableData data];
+  for(NSData *d in items)if(adv.length+d.length<=251)[adv appendData:d];
+ }
  if([adv isEqualToData:_advData?:[NSData data]]&&[scan isEqualToData:_scanData?:[NSData data]])return;
  BOOL first=_advData==nil;_advData=adv;_scanData=scan;
  if(_fd<0)return;
+ BOOL connectable=[ad[CBAdvertisementDataIsConnectable] boolValue];
+ if(!fits&&!_extended){
+  _extended=YES;first=YES;
+  GBLog(@"a device needs an extended advertisement (%lu bytes)",(unsigned long)adv.length);
+  if(_advertising||_conn>=0){
+   // Start over in extended mode (a connected twin finishes that first: tried again on update)
+   if(_conn>=0){_extended=NO;_advData=nil;return;}
+   _advertising=NO;
+   [self command:0x0c03 params:nil];
+   [self command:0x0c01 params:[NSData dataWithBytes:(uint8_t[]){0xff,0xff,0xff,0xff,0xff,0xff,0xbf,0x3d} length:8]];
+   [self command:0x2001 params:[NSData dataWithBytes:(uint8_t[]){0x1f,0x0a,0x02,0,0,0,0,0} length:8]];
+   [self command:0x2002 params:nil];
+  }
+ }
+ if(_extended){
+  if(first){
+   // Set 0: connectable or not; scannable can't go with connectable here, and needn't
+   NSMutableData *p=[NSMutableData data];put8(p,0);put16(p,connectable?0x0001:0x0000);
+   uint8_t interval[3]={0xa0,0,0};[p appendBytes:interval length:3];[p appendBytes:interval length:3];
+   put8(p,7);put8(p,1);put8(p,0);[p appendBytes:(uint8_t[6]){0} length:6];put8(p,0);put8(p,0x7f);put8(p,1);put8(p,0);put8(p,1);put8(p,0);put8(p,0);
+   [self command:0x2036 params:p];
+   NSMutableData *r=[NSMutableData dataWithBytes:(uint8_t[]){0} length:1];[r appendData:[self address]];[self command:0x2035 params:r];
+  }
+  NSMutableData *d=[NSMutableData data];put8(d,0);put8(d,3);put8(d,1);put8(d,(uint8_t)adv.length);[d appendData:adv];
+  [self command:0x2037 params:d];
+  [self advertise];
+  return;
+ }
  if(first){
   // ADV_IND when Android may connect, else ADV_SCAN_IND (scannable) or ADV_NONCONN_IND
-  BOOL connectable=[ad[CBAdvertisementDataIsConnectable] boolValue];
   uint8_t type=connectable?0:(scan.length?2:3);
   NSMutableData *p=[NSMutableData data];put16(p,0xa0);put16(p,0xa0);put8(p,type);put8(p,1);put8(p,0);[p appendBytes:(uint8_t[6]){0} length:6];put8(p,7);put8(p,0);
   [self command:0x2006 params:p];
@@ -272,8 +308,10 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
  [self advertise];
 }
 - (void)advertise {
- if(_advertising||_conn>=0||_fd<0)return;
- _advertising=YES;[self command:0x200a params:[NSData dataWithBytes:(uint8_t[]){1} length:1]];
+ if(_advertising||_conn>=0||_fd<0||!_advData)return;
+ _advertising=YES;
+ if(_extended)[self command:0x2039 params:[NSData dataWithBytes:(uint8_t[]){1,1,0,0,0,0} length:6]];
+ else [self command:0x200a params:[NSData dataWithBytes:(uint8_t[]){1} length:1]];
 }
 
 #pragma mark L2CAP

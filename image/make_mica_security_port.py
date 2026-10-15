@@ -99,6 +99,15 @@ add('etc/init/vm-absent-hardware.rc',b'''on early-init
     stop android.system.desktop.security.gscd
     stop vendor.secretkeeper.trusty
 ''','vendor_configs_file')
+# A lid switch, always open: without one, Android thinks the lid is shut (see guest_lid.sh).
+add('bin/vm-lid.sh',(R/'scripts/guest_lid.sh').read_bytes(),'vendor_shell_exec',0o755)
+add('etc/init/vm-lid.rc',b'''service vm-lid /system/bin/sh /vendor/bin/vm-lid.sh
+    user shell
+    group shell input uhid
+    seclabel u:r:shell:s0
+on post-fs-data
+    start vm-lid
+''','vendor_configs_file')
 # Fixed-verb control channel (power off, token, density, diagnostics) read from the serial console.
 add('bin/vm-host-control.sh',(R/'scripts/guest_host_control.sh').read_bytes(),'vendor_shell_exec',0o755)
 add('etc/init/vm-host-control.rc',b'''service vm-host-control /system/bin/sh /vendor/bin/vm-host-control.sh

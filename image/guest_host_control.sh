@@ -32,6 +32,9 @@ handle() {
       timeout 10 logcat -d -b main,system,events -t 20000 2>/dev/null | grep -E 'ActivityTaskManager|am_create_activity|am_crash|am_proc_died|wm_finish_activity|ActivityStarter' | tail -30 | cut -c1-220 | sed 's/^/VM_CONTROL starts /'
       timeout 8 dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | head -4 | cut -c1-200 | sed 's/^/VM_CONTROL focus /'
       timeout 8 dumpsys activity activities 2>/dev/null | grep -E 'ResumedActivity|\* Task\{|  \* Hist' | head -12 | cut -c1-200 | sed 's/^/VM_CONTROL activity /' ;;
+    VM_NEARBY)
+      # Quick Share and Nearby: what they log about discovery, Bluetooth and Wi-Fi
+      timeout 10 logcat -d -b main,system -t 60000 2>/dev/null | grep -i -E 'nearby|quickshare|sharing|fastpair|mdns|nsd|medium|bluetoothle|BtGatt|suspend|bt_|bluetooth|scanmanager|scanner' | tail -300 | cut -c1-230 | sed 's/^/VM_CONTROL nearby /' ;;
     VM_TOP)
       # What is using the guest's CPUs: one snapshot of the busiest processes and threads
       timeout 10 top -b -n 1 -m 20 2>&1 | head -30 | cut -c1-150 | sed 's/^/VM_CONTROL top /'
@@ -39,6 +42,9 @@ handle() {
     VM_STATUS)
       echo "VM_CONTROL boot=$(getprop sys.boot_completed) user=$(timeout 5 am get-current-user) size=$(timeout 5 wm size | tr '\n' ' ') density=$(timeout 5 wm density | tr '\n' ' ')"
       timeout 5 cat /proc/asound/cards 2>&1 | sed 's/^/VM_CONTROL asound /'
+      timeout 5 cmd device_state state 2>&1 | head -3 | sed 's/^/VM_CONTROL device_state /'
+      timeout 5 cmd device_state print-states 2>&1 | head -12 | sed 's/^/VM_CONTROL device_states /'
+      timeout 6 dumpsys input 2>/dev/null | grep -i -m6 -E 'lid|SW_|switch' | cut -c1-160 | sed 's/^/VM_CONTROL lid /'
       echo "VM_CONTROL bluetooth feature=$(timeout 5 pm list features 2>/dev/null | grep -c 'hardware.bluetooth$') on=$(timeout 5 settings get global bluetooth_on) hal=$(getprop init.svc.vendor.bluetooth-aidl-qti) gscd=$(getprop init.svc.android.system.desktop.security.gscd)"
       timeout 6 dumpsys bluetooth_manager 2>/dev/null | grep -m4 -i -E '^ *(enabled|state|address|name):' | cut -c1-80 | sed 's/^/VM_CONTROL btmgr /' ;;
   esac
