@@ -244,6 +244,7 @@ public final class Input {
             case 'F': touchFrame(p); break;
             case 'W': wheel(Integer.parseInt(p[1]), Integer.parseInt(p[2])); break;
             case 'B': battery(Integer.parseInt(p[1]), p[2].equals("1"), p[3].equals("1")); break;
+            case 'L': { String id = p.length > 1 ? p[1] : ""; Thread t = new Thread(() -> keyboardLayout(id), "layout"); t.setDaemon(true); t.start(); break; }
             default: break;
         }
     }
@@ -510,6 +511,79 @@ public final class Input {
         }, tag);
         t.setDaemon(true);
         t.start();
+    }
+
+    // The keyboard: Android types with the layout picked for the VM's USB keyboard, US unless told
+    // otherwise. The viewer sends the Mac's input source (L com.apple.keylayout.Brazilian-Pro, say)
+    // and the closest of Android's own layouts goes on that keyboard, for the IME language in use.
+    // Mac ids, most specific first; unknown ones leave Android's choice alone.
+    private static final String[][] LAYOUTS = {
+        { "Brazilian-Pro", "english_us_intl" }, { "USInternational", "english_us_intl" }, { "Brazilian", "brazilian" },
+        { "Dvorak", "english_us_dvorak" }, { "Colemak", "english_us_colemak" }, { "British", "english_uk" }, { "Irish", "english_uk" },
+        { "US", "english_us" }, { "ABC", "english_us" }, { "Australian", "english_us" }, { "Canadian-CSA", "french_ca" }, { "Canadian", "english_us" },
+        { "SwissFrench", "swiss_french" }, { "Swiss French", "swiss_french" }, { "SwissGerman", "swiss_german" }, { "Swiss German", "swiss_german" },
+        { "German", "german" }, { "Austrian", "german" }, { "Belgian", "belgian" }, { "French", "french" }, { "Spanish", "spanish" }, { "LatinAmerican", "spanish_latin" },
+        { "Italian", "italian" }, { "Portuguese", "portuguese" }, { "Danish", "danish" }, { "Norwegian", "norwegian" }, { "Swedish", "swedish" },
+        { "Finnish", "finnish" }, { "Icelandic", "icelandic" }, { "Dutch", "english_us" }, { "Polish", "polish" }, { "Czech-QWERTY", "czech_qwerty" },
+        { "Czech", "czech" }, { "Slovak", "slovak" }, { "Hungarian", "hungarian" }, { "Croatian", "croatian" }, { "Slovenian", "slovenian" },
+        { "Estonian", "estonian" }, { "Latvian", "latvian" }, { "Lithuanian", "lithuanian" }, { "Turkish-QWERTY", "turkish" }, { "Turkish", "turkish_f" },
+        { "Greek", "greek" }, { "Russian", "russian_mac" }, { "Ukrainian", "ukrainian" }, { "Bulgarian", "bulgarian" }, { "Hebrew", "hebrew" }, { "Arabic", "arabic" },
+    };
+    private static String appliedLayout;
+
+    private static synchronized void keyboardLayout(String macId) {
+        String name = macId.startsWith("com.apple.keylayout.") ? macId.substring(20) : null, layout = null;
+        if (name != null) for (String[] m : LAYOUTS) if (name.startsWith(m[0])) { layout = m[1]; break; }
+        if (layout == null) { System.out.println("VM_INPUT keyboard: no Android layout for " + macId); return; }
+        String descriptor = "com.android.inputdevices/com.android.inputdevices.InputDeviceReceiver/keyboard_layout_" + layout;
+        try {
+            Class<?> sm = Class.forName("android.os.ServiceManager");
+            java.lang.reflect.Method get = sm.getMethod("getService", String.class);
+            Object im = Class.forName("android.hardware.input.IInputManager$Stub").getMethod("asInterface", IBinder.class).invoke(null, get.invoke(null, "input"));
+            Object imm = Class.forName("com.android.internal.view.IInputMethodManager$Stub").getMethod("asInterface", IBinder.class).invoke(null, get.invoke(null, "input_method"));
+            int user = (Integer) Class.forName("android.app.ActivityManager").getMethod("getCurrentUser").invoke(null);
+            Object info = null, subtype = null;
+            for (java.lang.reflect.Method m : imm.getClass().getMethods()) {
+                if (m.getName().equals("getCurrentInputMethodInfoAsUser") && m.getParameterCount() == 1) info = m.invoke(imm, user);
+                if (m.getName().equals("getCurrentInputMethodSubtype") && m.getParameterCount() == 1) subtype = m.invoke(imm, user);
+            }
+            int done = 0;
+            for (int id : (int[]) im.getClass().getMethod("getInputDeviceIds").invoke(im)) {
+                android.view.InputDevice d = (android.view.InputDevice) im.getClass().getMethod("getInputDevice", int.class).invoke(im, id);
+                // QEMU's USB keyboard: the one the Mac keyboard types through
+                if (d == null || d.isVirtual() || !d.getName().contains("Keyboard") || d.getKeyboardType() != android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC) continue;
+                Object ident = d.getClass().getMethod("getIdentifier").invoke(d);
+                boolean set = false;
+                for (java.lang.reflect.Method m : im.getClass().getMethods()) {
+                    if (!m.getName().equals("setKeyboardLayoutForInputDevice")) continue;
+                    Class<?>[] t = m.getParameterTypes();
+                    if (t.length == 5) { m.invoke(im, ident, user, info, subtype, descriptor); set = true; }
+                    else if (t.length == 2) { m.invoke(im, ident, descriptor); set = true; }
+                }
+                if (set) done++;
+                else {
+                    StringBuilder sb = new StringBuilder();
+                    for (java.lang.reflect.Method m : im.getClass().getMethods()) if (m.getName().contains("KeyboardLayout")) sb.append(' ').append(m.getName()).append(m.getParameterCount());
+                    System.out.println("VM_INPUT keyboard: no way to set a layout here:" + sb);
+                }
+            }
+            if (done > 0 && !descriptor.equals(appliedLayout)) {
+                // Whether it took: the keyboard's character map has the layout's accent keys now
+                SystemClock.sleep(1500);
+                String check = "";
+                for (int id : (int[]) im.getClass().getMethod("getInputDeviceIds").invoke(im)) {
+                    android.view.InputDevice d = (android.view.InputDevice) im.getClass().getMethod("getInputDevice", int.class).invoke(im, id);
+                    if (d == null || d.isVirtual() || !d.getName().contains("Keyboard")) continue;
+                    android.view.KeyCharacterMap k = d.getKeyCharacterMap();
+                    check = ", apostrophe " + ((k.get(android.view.KeyEvent.KEYCODE_APOSTROPHE, 0) & android.view.KeyCharacterMap.COMBINING_ACCENT) != 0 ? "is an accent" : "types '" + (char) k.get(android.view.KeyEvent.KEYCODE_APOSTROPHE, 0) + "'");
+                }
+                System.out.println("VM_INPUT keyboard " + name + " -> " + layout + check);
+            }
+            if (done > 0) appliedLayout = descriptor;
+        } catch (Throwable t) {
+            Throwable c = t instanceof java.lang.reflect.InvocationTargetException ? t.getCause() : t;
+            System.out.println("VM_INPUT keyboard layout failed: " + c);
+        }
     }
 
     /** How full Android's storage is ("d FREE TOTAL", MiB), so the viewer can warn before it runs

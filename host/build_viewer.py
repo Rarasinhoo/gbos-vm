@@ -39,7 +39,7 @@ for p in [build / 'modules', S / 'CocoaSpice/include', S / 'CocoaSpice', S / 'Co
     cmd += ['-I', str(p)]
 cmd += sources
 for n in ('AppKit', 'Metal', 'MetalKit', 'CoreGraphics', 'CoreImage', 'IOSurface', 'CoreVideo', 'IOKit',
-          'AVFoundation', 'CoreMedia', 'ImageIO', 'CoreBluetooth', 'ApplicationServices'):
+          'AVFoundation', 'CoreMedia', 'ImageIO', 'CoreBluetooth', 'ApplicationServices', 'Carbon'):
     cmd += ['-framework', n]
 for n in ('spice-client-glib-2.0.8', 'glib-2.0.0', 'gobject-2.0.0', 'gio-2.0.0', 'gstreamer-1.0.0'):
     cmd.append(str(frameworks / (n + '.framework') / n))

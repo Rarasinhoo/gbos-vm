@@ -45,6 +45,12 @@ handle() {
       t=${line#VM_TAP }; x=${t%% *}; y=${t#* }
       case "$x$y" in *[!0-9]*) return ;; esac
       timeout 5 input tap "$x" "$y"; echo "VM_CONTROL tapped $x $y" ;;
+    VM_KEYBOARD)
+      # The physical keyboard: its layout, the keyboard language Android picks it by, and who may set it
+      timeout 8 dumpsys input 2>/dev/null | grep -i -E 'keyboard ?layout|KeyCharacterMap|kcm|Keyboard Type|QEMU|layout' | head -40 | cut -c1-200 | sed 's/^/VM_CONTROL keyboard input /'
+      echo "VM_CONTROL keyboard locale $(getprop persist.sys.locale) ime $(settings get secure default_input_method)"
+      timeout 8 dumpsys input_method 2>/dev/null | grep -i -E 'subtype|mCurMethodId|languageTag' | head -10 | cut -c1-200 | sed 's/^/VM_CONTROL keyboard ime /'
+      timeout 8 dumpsys package com.android.shell 2>/dev/null | grep -i -E 'KEYBOARD_LAYOUT|INPUT_DEVICE' | head | sed 's/^/VM_CONTROL keyboard shell /' ;;
     VM_DISK)
       # What fills Android's storage: the data partition, and the size of apps, their data and caches
       df -h /data 2>&1 | sed 's/^/VM_CONTROL disk df /'

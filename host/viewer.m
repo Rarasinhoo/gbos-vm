@@ -14,6 +14,7 @@
 #import <arpa/inet.h>
 #import <CommonCrypto/CommonHMAC.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <Carbon/Carbon.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/sysctl.h>
@@ -21,12 +22,13 @@
 #include <net/if_dl.h>
 
 static unsigned short scan[128] = {
- [0]=0x1e,[1]=0x1f,[2]=0x20,[3]=0x21,[4]=0x23,[5]=0x22,[6]=0x2c,[7]=0x2d,[8]=0x2e,[9]=0x2f,[11]=0x30,
+ [0]=0x1e,[1]=0x1f,[2]=0x20,[3]=0x21,[4]=0x23,[5]=0x22,[6]=0x2c,[7]=0x2d,[8]=0x2e,[9]=0x2f,[10]=0x56,[11]=0x30,
  [12]=0x10,[13]=0x11,[14]=0x12,[15]=0x13,[16]=0x15,[17]=0x14,[18]=2,[19]=3,[20]=4,[21]=5,[22]=7,[23]=6,
  [24]=0x0d,[25]=0x0a,[26]=8,[27]=0x0c,[28]=9,[29]=0x0b,[30]=0x1b,[31]=0x18,[32]=0x16,[33]=0x1a,[34]=0x17,[35]=0x19,
  [36]=0x1c,[37]=0x26,[38]=0x24,[39]=0x28,[40]=0x25,[41]=0x27,[42]=0x2b,[43]=0x33,[44]=0x35,[45]=0x31,[46]=0x32,[47]=0x34,
  [48]=0x0f,[49]=0x39,[50]=0x29,[51]=0x0e,[53]=1,[55]=0x15b,[54]=0x15c,[56]=0x2a,[60]=0x36,[58]=0x38,[61]=0x138,[59]=0x1d,[62]=0x11d,
  [65]=0x53,[67]=0x37,[69]=0x4e,[75]=0x135,[76]=0x11c,[78]=0x4a,[82]=0x52,[83]=0x4f,[84]=0x50,[85]=0x51,[86]=0x4b,[87]=0x4c,[88]=0x4d,[89]=0x47,[91]=0x48,[92]=0x49,
+ [72]=0x130,[73]=0x12e,[74]=0x120,[114]=0x152,
  [96]=0x3f,[97]=0x40,[98]=0x41,[99]=0x3d,[100]=0x42,[101]=0x43,[103]=0x57,[109]=0x44,[111]=0x58,[115]=0x147,[116]=0x149,[117]=0x153,[118]=0x3e,[119]=0x14f,[120]=0x3c,[121]=0x151,[122]=0x3b,[123]=0x14b,[124]=0x14d,[125]=0x150,[126]=0x148
 };
 @interface VMView : MTKView
@@ -344,7 +346,7 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  self.renderer=[[CSMetalRenderer alloc] initWithMetalKitView:self.view];self.view.delegate=self.renderer;
  self.window.contentView=self.view;[self.window center];[self.window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];
  if(self.startFullscreen)[self.window toggleFullScreen:nil];
- __weak App *weakSelf=self;self.view.sendLine=^(NSString *l){[weakSelf ctlSend:l];};[self startControlServer];[self watchBattery];[self watchOtherWindows];
+ __weak App *weakSelf=self;self.view.sendLine=^(NSString *l){[weakSelf ctlSend:l];};[self startControlServer];[self watchBattery];[self watchOtherWindows];[self watchKeyboardLayout];
  [CSMain.sharedInstance spiceSetDebug:NO];
  if(![CSMain.sharedInstance spiceStart]){fprintf(stderr,"SPICE worker failed\n");[NSApp terminate:nil];return;}
  if(self.socketPath)[self connectSpice];else [self startVM];
@@ -722,6 +724,17 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
   if(t.length){NSPasteboard *pb=[NSPasteboard generalPasteboard];[pb clearContents];[pb setString:t forType:NSPasteboardTypeString];}
  }
 }
+// The Mac's keyboard layout, so Android types the same characters (the helper picks its closest
+// layout): on each link, and whenever the input source changes.
+- (void)sendKeyboardLayout {
+ TISInputSourceRef src=TISCopyCurrentKeyboardLayoutInputSource();if(!src)return;
+ NSString *sid=(__bridge NSString *)TISGetInputSourceProperty(src,kTISPropertyInputSourceID);
+ if(sid.length&&[sid rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location==NSNotFound)[self ctlSend:[@"L " stringByAppendingString:sid]];
+ CFRelease(src);
+}
+- (void)watchKeyboardLayout {
+ [[NSDistributedNotificationCenter defaultCenter] addObserverForName:(__bridge NSString *)kTISNotifySelectedKeyboardInputSourceChanged object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){[self sendKeyboardLayout];}];
+}
 // Android's storage, as the helper reports it. The first report of a run means Android is up and
 // the disk works, so a backup of the previous disk (from an update or a storage change) can go;
 // and when less than a tenth is left, offer more, once a run.
@@ -796,7 +809,7 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
     [self ctlSend:[@"A " stringByAppendingString:[self ctlHmac:[NSString stringWithFormat:@"gbos-host:%@:%@",p[1],hostNonce]]]];
     [self.view resetTouchpad];[self applyPointerMode];
     fprintf(stderr,"CONTROL connected\n");[self updateSubtitle];
-    [self ctlSend:batteryLine()];[self ctlSend:@"W 0 0"];  // creates the guest's high-resolution wheel
+    [self ctlSend:batteryLine()];[self sendKeyboardLayout];[self ctlSend:@"W 0 0"];  // creates the guest's high-resolution wheel
    }
    // Cap the line length, much lower before the token is proven.
    if(buffer.length>(authed?(2u<<20):512u)){fprintf(stderr,"CONTROL dropped peer: line too long\n");[self ctlDrop:rs];}
