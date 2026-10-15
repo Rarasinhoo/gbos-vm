@@ -132,6 +132,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
  uint8_t _pendingOp;
  uint16_t _pendingOffset;
  NSUInteger _waitSerial;
+ NSMutableArray<NSArray *> *_prepared;   // long writes queued until Android executes them: handle, offset, value
 }
 
 - (instancetype)init {
@@ -360,6 +361,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
  _discovering=1;[self.peripheral discoverServices:nil];
 }
 - (void)macDisconnected:(NSError *)error {
+ if(_conn>=0)GBLog(@"so the twin hangs up on Android");
  // The real device went away: so does Android's connection to its twin.
  if(_conn>=0){NSMutableData *p=[NSMutableData data];put16(p,(uint16_t)_conn);put8(p,0x13);[self command:0x0406 params:p];}
 }
@@ -419,6 +421,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
  while(_attrs&&!_attBusy&&_attQueue.count){NSData *pdu=_attQueue.firstObject;[_attQueue removeObjectAtIndex:0];[self attHandle:pdu];}
 }
 - (void)attError:(uint8_t)op handle:(uint16_t)h code:(uint8_t)code {
+ if(op!=0x04&&op!=0x08&&op!=0x10&&op!=0x06)GBLog(@"ATT error %02x for request %02x on handle %u",code,op,h);   // not the end of a discovery
  NSMutableData *r=[NSMutableData data];put8(r,0x01);put8(r,op);put16(r,h);put8(r,code);[self send:4 payload:r];
 }
 - (GBAttr *)attr:(uint16_t)h {return h>=1&&h<=_attrs.count?_attrs[h-1]:nil;}
@@ -426,6 +429,8 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 
 - (void)attHandle:(NSData *)pdu {
  const uint8_t *p=pdu.bytes;NSUInteger n=pdu.length;uint8_t op=p[0];
+ if(op==0x18)GBLog(@"Android executes a long write");
+ if(op==0x12||op==0x52||op==0x0a)GBLog(@"Android %s handle %u (%lu bytes)",op==0x0a?"reads":op==0x12?"writes":"writes (no reply)",n>=3?get16(p+1):0,(unsigned long)(n>3?n-3:0));
  NSMutableData *r=[NSMutableData data];
  switch(op){
   case 0x02: {   // exchange MTU
@@ -465,6 +470,25 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
    uint16_t off=op==0x0c&&n>=5?get16(p+3):0;
    if(a.kind==GBAttrStatic||a.kind==GBAttrCCCD||(op==0x0c&&off>0&&a.value.length)){[self reply:a op:op offset:off];return;}
    [self read:a op:op offset:off];return;}
+  case 0x16: {   // prepare write: one piece of a long write, echoed back
+   if(n<5)break;GBAttr *a=[self attr:get16(p+1)];
+   if(!a||a.kind==GBAttrStatic){[self attError:op handle:get16(p+1) code:a?0x03:0x01];return;}
+   if(!_prepared)_prepared=[NSMutableArray array];
+   if(_prepared.count>=64){[self attError:op handle:a.handle code:0x09];return;}   // prepare queue full
+   [_prepared addObject:@[@(a.handle),@(get16(p+3)),[pdu subdataWithRange:NSMakeRange(5,n-5)]]];
+   NSMutableData *e=[NSMutableData dataWithData:pdu];((uint8_t *)e.mutableBytes)[0]=0x17;[self send:4 payload:e];return;}
+  case 0x18: {   // execute write: write what was prepared (flags 1), or drop it (0)
+   if(n<2)break;
+   NSArray *pieces=_prepared?:@[];_prepared=nil;
+   if(p[1]!=1||!pieces.count){put8(r,0x19);[self send:4 payload:r];return;}
+   // The pieces of one attribute, in offset order, as one value (Android writes one at a time)
+   uint16_t h=[pieces.firstObject[0] unsignedShortValue];NSMutableData *v=[NSMutableData data];
+   for(NSArray *piece in pieces){if([piece[0] unsignedShortValue]!=h)continue;NSUInteger off=[piece[1] unsignedShortValue];NSData *d=piece[2];
+    if(off>v.length){[self attError:op handle:h code:0x07];return;}[v setLength:off];[v appendData:d];}
+   GBAttr *a=[self attr:h];
+   if(a.kind==GBAttrValue){[self.peripheral writeValue:v forCharacteristic:a.characteristic type:CBCharacteristicWriteWithResponse];[self wait:a op:op];return;}
+   if(a.kind==GBAttrDescriptor){[self.peripheral writeValue:v forDescriptor:a.descriptor];[self wait:a op:op];return;}
+   [self attError:op handle:h code:0x03];return;}
   case 0x12: case 0x52: {   // write request, write command
    if(n<3)break;GBAttr *a=[self attr:get16(p+1)];NSData *v=[pdu subdataWithRange:NSMakeRange(3,n-3)];
    if(!a){if(op==0x12)[self attError:op handle:get16(p+1) code:0x01];return;}
@@ -510,7 +534,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
  _attBusy=NO;_pending=nil;
  // CoreBluetooth's ATT errors carry the ATT error code itself
  if(error)[self attError:_pendingOp handle:a.handle code:[error.domain isEqualToString:CBATTErrorDomain]?(uint8_t)error.code:0x0e];
- else if(_pendingOp==0x12){NSMutableData *r=[NSMutableData data];put8(r,0x13);[self send:4 payload:r];}
+ else if(_pendingOp==0x12||_pendingOp==0x18){NSMutableData *r=[NSMutableData data];put8(r,_pendingOp==0x12?0x13:0x19);[self send:4 payload:r];}
  else [self reply:a op:_pendingOp offset:_pendingOffset];
  [self nextAtt];
 }
@@ -710,7 +734,15 @@ static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
 - (void)centralManager:(CBCentralManager *)c didDiscoverPeripheral:(CBPeripheral *)p advertisementData:(NSDictionary *)ad RSSI:(NSNumber *)rssi {
  GBMirror *m=self.mirrors[p.identifier];
  if(!m){
-  if(!worthRelaying(ad,p,self.phones)||self.mirrors.count>=(self.phones?kMaxMirrorsWithPhones:kMaxMirrors))return;
+  if(!worthRelaying(ad,p,self.phones))return;
+  // Full: the twin heard from least recently goes (phones change identity every few minutes,
+  // so a new one would otherwise wait until old twins time out)
+  if(self.mirrors.count>=(self.phones?kMaxMirrorsWithPhones:kMaxMirrors)){
+   NSUUID *oldest=nil;NSTimeInterval t=CFAbsoluteTimeGetCurrent();
+   for(NSUUID *k in self.mirrors){GBMirror *o=self.mirrors[k];if(!o.connected&&o.lastSeen<t){t=o.lastSeen;oldest=k;}}
+   if(!oldest||CFAbsoluteTimeGetCurrent()-t<5)return;   // all in use or just heard
+   [self.mirrors[oldest] close];[self.mirrors removeObjectForKey:oldest];
+  }
   m=[GBMirror new];m.peripheral=p;m.advertisement=ad;m.relay=self;
   if(![m openOnPort:self.port queue:self.queue]){GBLog(@"the VM's Bluetooth controller isn't reachable");return;}
   self.mirrors[p.identifier]=m;
@@ -738,6 +770,8 @@ static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
  if(m.peripheral.state!=CBPeripheralStateDisconnected)[self.central cancelPeripheralConnection:m.peripheral];
 }
 - (void)centralManager:(CBCentralManager *)c didConnectPeripheral:(CBPeripheral *)p {[self.mirrors[p.identifier] macConnected];}
-- (void)centralManager:(CBCentralManager *)c didFailToConnectPeripheral:(CBPeripheral *)p error:(NSError *)e {[self.mirrors[p.identifier] macDisconnected:e];}
-- (void)centralManager:(CBCentralManager *)c didDisconnectPeripheral:(CBPeripheral *)p error:(NSError *)e {[self.mirrors[p.identifier] macDisconnected:e];}
+- (void)centralManager:(CBCentralManager *)c didFailToConnectPeripheral:(CBPeripheral *)p error:(NSError *)e {
+ GBLog(@"the Mac couldn't connect to the real device: %@ %ld",e.domain,(long)e.code);[self.mirrors[p.identifier] macDisconnected:e];}
+- (void)centralManager:(CBCentralManager *)c didDisconnectPeripheral:(CBPeripheral *)p error:(NSError *)e {
+ GBLog(@"the real device disconnected from the Mac: %@ %ld",e.domain?:@"-",(long)e.code);[self.mirrors[p.identifier] macDisconnected:e];}
 @end
