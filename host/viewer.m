@@ -319,8 +319,11 @@ static NSInteger guestDensity(NSInteger width,NSScreen *screen) {
  {NSUserDefaults *u=[NSUserDefaults standardUserDefaults];  // the network checkboxes became one choice
   if(![u objectForKey:@"Network"]&&([u objectForKey:@"Networking"]||[u objectForKey:@"IsolateNetwork"]))
    [u setObject:([u objectForKey:@"Networking"]&&![u boolForKey:@"Networking"])?@"off":[u boolForKey:@"IsolateNetwork"]?@"isolated":@"full" forKey:@"Network"];
-  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"RefreshCap",@"Graphics",@"PointerMode",@"AndroidTouchpad",@"TrackpadGestures"])[u removeObjectForKey:k];}
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES}];
+  for(NSString *k in @[@"Networking",@"IsolateNetwork",@"RefreshCap",@"Graphics",@"PointerMode",@"AndroidTouchpad",@"TrackpadGestures",
+                       @"GuestClipboardToMac",@"Audio",@"Camera",@"Microphone",@"Bluetooth",@"BluetoothPhones"])[u removeObjectForKey:k];
+  // Settings offers two networks now; the isolated and offline ones remain run_vm.py options
+  if(![@[@"full",@"lan"] containsObject:[u stringForKey:@"Network"]?:@"full"])[u removeObjectForKey:@"Network"];}
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":memory,@"CPUs":@6,@"Network":@"full",@"GuestClipboardToMac":@YES,@"Audio":@YES,@"Camera":@YES,@"Microphone":@YES}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.allowedTouchTypes=NSTouchTypeMaskIndirect;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
@@ -640,27 +643,21 @@ static CGEventRef swipeTapped(CGEventTapProxy proxy,CGEventType type,CGEventRef 
 - (void)showSettings:(id)sender {
  if(!self.settingsWindow){
   NSTextField *(^label)(NSString *)=^NSTextField *(NSString *t){NSTextField *l=[NSTextField labelWithString:t];l.alignment=NSTextAlignmentRight;return l;};
-  NSTextField *hint=[self hint:@"The Mac cursor drives Android; the mouse locks only for an app that asks (⌃⌥ releases)."];
-  NSTextField *note=[self hint:@"Everything below applies the next time you start the VM."];
+  NSTextField *note=[self hint:@"Display, memory, processor and network changes apply when the VM restarts."];
+  NSBox *(^line)(void)=^NSBox *{NSBox *b=[NSBox new];b.boxType=NSBoxSeparator;return b;};
   NSGridView *grid=[NSGridView gridViewWithViews:@[
-   @[[NSGridCell emptyContentView],hint],
-   @[label(@"Trackpad:"),[self checkbox:@"MacSwipes" title:@"Three- and four-finger swipes go to Android, not Mission Control or Spaces,\nwhile the pointer is over Android (needs Accessibility permission)"]],
-   @[label(@"Clipboard:"),[self checkbox:@"GuestClipboardToMac" title:@"Copy text copied in Android to the Mac clipboard"]],
-   @[[NSGridCell emptyContentView],note],
-   @[[NSGridCell emptyContentView],[NSButton buttonWithTitle:@"Restart VM Now" target:self action:@selector(restartVM:)]],
    @[label(@"Resolution:"),[self popup:@"Resolution" titles:@[@"Match this Mac's display",@"1920 × 1080 (16:9)",@"2560 × 1440 (16:9)",@"3840 × 2160 (16:9, 4K)",@"3440 × 1440 (21:9 ultrawide)",@"1920 × 1200 (16:10)",@"2560 × 1600 (16:10)",@"3024 × 1890 (16:10)",@"3456 × 2160 (16:10)"] values:@[@"native",@"1920x1080",@"2560x1440",@"3840x2160",@"3440x1440",@"1920x1200",@"2560x1600",@"3024x1890",@"3456x2160"]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"StartFullscreen" title:@"Start in full screen"]],
    @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],
    @[label(@"Processor cores:"),[self popup:@"CPUs" titles:@[@"4",@"6",@"8"] values:@[@4,@6,@8]]],
-   @[label(@"Network:"),[self popup:@"Network" titles:@[@"Internet",@"Same network as this Mac (phones nearby can find it; needs run/lan-setup.sh once)",@"Isolated from this Mac (no internet or Mac services)",@"Off (also no pointer or clipboard link)"] values:@[@"full",@"lan",@"isolated",@"off"]]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Audio" title:@"Audio output"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Camera" title:@"Camera (Android sees this Mac's camera as a USB webcam)"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Microphone" title:@"Microphone (Android hears this Mac's microphone as a USB mic)"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Bluetooth" title:@"Bluetooth (experimental: Android sees the Bluetooth LE devices near this Mac)"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"BluetoothPhones" title:@"… Android phones too (yours, for Quick Share and Better Together; also others nearby)"]]]];
+   @[label(@"Network:"),[self popup:@"Network" titles:@[@"Through this Mac",@"On this Mac's network (phones nearby can find it)"] values:@[@"full",@"lan"]]],
+   @[[NSGridCell emptyContentView],note],
+   @[[NSGridCell emptyContentView],[NSButton buttonWithTitle:@"Restart VM Now" target:self action:@selector(restartVM:)]],
+   @[line(),line()],
+   @[label(@"Trackpad:"),[self checkbox:@"MacSwipes" title:@"Three- and four-finger swipes go to Android, not Mission Control or Spaces,\nwhile the pointer is over Android (needs Accessibility permission)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
-  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,520) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,360) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
   w.title=@"Googlebook Settings";w.releasedWhenClosed=NO;[w.contentView addSubview:grid];
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;

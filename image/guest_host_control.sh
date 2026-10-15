@@ -45,6 +45,13 @@ handle() {
       t=${line#VM_TAP }; x=${t%% *}; y=${t#* }
       case "$x$y" in *[!0-9]*) return ;; esac
       timeout 5 input tap "$x" "$y"; echo "VM_CONTROL tapped $x $y" ;;
+    VM_DISK)
+      # What fills Android's storage: the data partition, and the size of apps, their data and caches
+      df -h /data 2>&1 | sed 's/^/VM_CONTROL disk df /'
+      timeout 20 dumpsys diskstats 2>/dev/null | grep -v -E '^(Package Names|App Sizes|App Data Sizes|Cache Sizes):' | cut -c1-200 | sed 's/^/VM_CONTROL disk /'
+      timeout 30 du -sh /sdcard/* /data/local/tmp 2>/dev/null | sort -rh | head -15 | sed 's/^/VM_CONTROL disk files /'
+      timeout 20 dumpsys storagestats 2>/dev/null | head -40 | cut -c1-200 | sed 's/^/VM_CONTROL disk stats /'
+      timeout 10 pm list packages -3 2>/dev/null | head -40 | tr '\n' ' ' | sed 's/^/VM_CONTROL disk installed /'; echo ;;
     VM_SF)
       # How SurfaceFlinger paces frames (pointer latency): its settings and its vsync timing
       getprop | grep -E 'surface_flinger|debug\.sf|hwc|composer' | cut -c1-160 | sed 's/^/VM_CONTROL sf prop /'
