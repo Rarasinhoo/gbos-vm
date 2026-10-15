@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Googlebook VM app icon: a dark lid with the glowing light bar, in colours sampled along the
+       bar on a Googlebook. Full-bleed on purpose: macOS 26 and later cut app icons to the system's
+       rounded shape themselves, and shrink icons that bring their own shape onto a grey plate.
+       host/AppIcon.png is this drawing rendered at 1024 x 1024 (any browser will do). -->
+  <defs>
+    <radialGradient id="lid" cx="0.102" cy="-0.022" r="1.367">
+      <stop offset="0" stop-color="#47505C"/><stop offset="0.45" stop-color="#2A323A"/><stop offset="1" stop-color="#1A2026"/>
+    </radialGradient>
+    <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#20272E"/><stop offset="1" stop-color="#07090B"/>
+    </linearGradient>
+    <filter id="noise" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.69" numOctaves="2" seed="7"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.9 0"/>
+    </filter>
+    <linearGradient id="bar" gradientUnits="userSpaceOnUse" x1="164" y1="0" x2="860" y2="0">
+      <stop offset="0" stop-color="#55B1FF"/><stop offset="0.22" stop-color="#54B1FA"/>
+      <stop offset="0.32" stop-color="#4FB8EB"/><stop offset="0.42" stop-color="#56C7C0"/>
+      <stop offset="0.52" stop-color="#8DD47A"/><stop offset="0.61" stop-color="#CDDC38"/>
+      <stop offset="0.7" stop-color="#F3CD2B"/><stop offset="0.8" stop-color="#FB9356"/>
+      <stop offset="0.9" stop-color="#FE7268"/><stop offset="1" stop-color="#FB7269"/>
+    </linearGradient>
+    <linearGradient id="tube" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset="0.5" stop-color="#fff" stop-opacity="0.38"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-400%" width="160%" height="900%"><feGaussianBlur stdDeviation="16"/></filter>
+    <filter id="bloom" x="-40%" y="-900%" width="180%" height="1900%"><feGaussianBlur stdDeviation="52.5"/></filter>
+  </defs>
+  <!-- lid -->
+  <rect width="1024" height="1024" fill="url(#lid)"/>
+  <rect width="1024" height="1024" filter="url(#noise)" opacity="0.07"/>
+  <!-- light bar: wide bloom, glow, the bar itself, a highlight along its middle -->
+  <rect x="164" y="497" width="696" height="50" rx="25" fill="url(#bar)" filter="url(#bloom)" opacity="0.55"/>
+  <rect x="164" y="497" width="696" height="50" rx="25" fill="url(#bar)" filter="url(#glow)" opacity="0.95"/>
+  <rect x="164" y="497" width="696" height="50" rx="25" fill="url(#bar)"/>
+  <rect x="179" y="506" width="666" height="32" rx="16" fill="url(#tube)"/>
+  <!-- hinge seam and base -->
+  <rect y="832" width="1024" height="5" fill="#0B0F12" opacity="0.9"/>
+  <rect y="837" width="1024" height="2.5" fill="#4A535D" opacity="0.7"/>
+  <rect y="839.5" width="1024" height="323" fill="url(#base)"/>
+  <rect y="839.5" width="1024" height="184.5" filter="url(#noise)" opacity="0.05"/>
+</svg>

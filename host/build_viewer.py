@@ -47,6 +47,16 @@ for n in ('spice-client-glib-2.0.8', 'glib-2.0.0', 'gobject-2.0.0', 'gio-2.0.0',
 cmd += ['-Wl,-rpath,' + str(frameworks), '-Wl,-rpath,@executable_path/../../../../UTM-beta/UTM.app/Contents/Frameworks',
         '-o', str(app / 'MacOS/GooglebookViewer')]
 subprocess.run(cmd, check=True)
+# App icon: host/AppIcon.png (1024 px, drawn from host/AppIcon.svg) as Resources/AppIcon.icns.
+iconset = build / 'AppIcon.iconset'
+shutil.rmtree(iconset, ignore_errors=True); iconset.mkdir()
+for size in (16, 32, 128, 256, 512):
+    for scale, suffix in ((1, ''), (2, '@2x')):
+        subprocess.run(['sips', '-z', str(size * scale), str(size * scale), str(viewer_m.parent / 'AppIcon.png'),
+                        '--out', str(iconset / f'icon_{size}x{size}{suffix}.png')], check=True, capture_output=True)
+subprocess.run(['iconutil', '-c', 'icns', str(iconset), '-o', str(app / 'Resources/AppIcon.icns')], check=True)
+info = plistlib.loads((app / 'Info.plist').read_bytes())
+(app / 'Info.plist').write_bytes(plistlib.dumps({**info, 'CFBundleIconFile': 'AppIcon'}))
 # build-host.sh's local certificate when there is one (a stable identity for macOS's permissions)
 sign = ['--keychain', os.environ['GBOS_SIGN_KEYCHAIN'], '--sign', os.environ['GBOS_SIGN_ID']] if os.environ.get('GBOS_SIGN_ID') else ['--sign', '-']
 subprocess.run(['codesign', '--force', *sign, str(app.parent)], check=True, capture_output=True)
