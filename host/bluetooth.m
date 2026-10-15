@@ -81,7 +81,8 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 
 @class GBBluetoothRelay, GBListener;
 @interface GBMirror : NSObject<CBPeripheralDelegate>
-@property(nonatomic,strong) CBPeripheral *peripheral;
+@property(nonatomic,strong) CBPeripheral *peripheral;   // the device's latest identity
+@property(nonatomic,copy) NSString *key;                 // what the twin stands for (twinKey)
 @property(nonatomic,strong) NSDictionary *advertisement;
 @property(nonatomic) NSTimeInterval lastSeen;
 @property(nonatomic,weak) GBBluetoothRelay *relay;
@@ -99,7 +100,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 @property(nonatomic) BOOL phones;
 @property(nonatomic,strong) dispatch_queue_t queue;
 @property(nonatomic,strong,nullable) CBCentralManager *central;
-@property(nonatomic,strong) NSMutableDictionary<NSUUID *,GBMirror *> *mirrors;
+@property(nonatomic,strong) NSMutableDictionary<NSString *,GBMirror *> *mirrors;   // by twinKey
 @property(nonatomic,strong,nullable) dispatch_source_t sweep;
 @property(nonatomic,strong,nullable) NSMutableDictionary<NSString *,NSMutableSet *> *tally;
 @property(nonatomic,strong,nullable) CBPeripheralManager *advertiser;
@@ -126,6 +127,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
  NSData *_advData;   // what is being advertised (all sets), to tell a change
  BOOL _advertising, _extended;
  NSArray<NSData *> *_sets;               // the advertisements in extended mode, one set each
+ NSArray<NSNumber *> *_shape;            // ... and whether each is classic (legacy PDUs)
  NSMutableArray<GBAttr *> *_attrs;       // nil until the real device's database is discovered
  NSUInteger _discovering;
  NSMutableArray<NSData *> *_attQueue;    // requests from Android waiting for the database or a reply
@@ -147,7 +149,7 @@ typedef NS_ENUM(int, GBAttrKind) {GBAttrStatic, GBAttrValue, GBAttrDescriptor, G
 
 // A stable random static address for this device (two top bits set), from its CoreBluetooth id
 - (NSData *)address {
- NSData *idb=[self.peripheral.identifier.UUIDString dataUsingEncoding:NSUTF8StringEncoding];
+ NSData *idb=[self.key dataUsingEncoding:NSUTF8StringEncoding];
  uint8_t h[CC_SHA256_DIGEST_LENGTH];CC_SHA256(idb.bytes,(CC_LONG)idb.length,h);
  h[5]|=0xc0;
  return [NSData dataWithBytes:h length:6];
@@ -276,7 +278,7 @@ static const NSUInteger kMaxSets = 4;
  if(!sets.count)[sets addObject:[NSMutableData dataWithBytes:(uint8_t[]){2,1,6} length:3]];
  NSData *all=[NSKeyedArchiver archivedDataWithRootObject:sets requiringSecureCoding:NO error:nil];
  if([all isEqualToData:_advData?:[NSData data]])return;
- BOOL first=_advData==nil;_advData=all;_sets=sets;
+ BOOL first=_advData==nil;NSUInteger before=_sets.count;_advData=all;_sets=sets;
  if(_fd<0)return;
  BOOL connectable=[ad[CBAdvertisementDataIsConnectable] boolValue];
  if(sets.count==1&&sets[0].length<=31&&!_extended){
@@ -299,6 +301,18 @@ static const NSUInteger kMaxSets = 4;
   [self command:0x2001 params:[NSData dataWithBytes:(uint8_t[]){0x1f,0x0a,0x02,0,0,0,0,0} length:8]];
   [self command:0x2002 params:nil];
  }
+ // Same sets, new contents (beacons rotate their data every few minutes): update them in place,
+ // while they keep advertising. Stopping them for a moment makes scanners count the device as gone.
+ BOOL sameShape=!first&&before==sets.count&&_shape.count==sets.count;
+ for(NSUInteger h=0;sameShape&&h<sets.count;h++)sameShape=[_shape[h] boolValue]==(sets[h].length<=31);
+ if(sameShape&&_advertising){
+  for(NSUInteger h=0;h<sets.count;h++){
+   NSMutableData *d=[NSMutableData data];put8(d,(uint8_t)h);put8(d,3);put8(d,1);put8(d,(uint8_t)sets[h].length);[d appendData:sets[h]];
+   [self command:0x2037 params:d];
+  }
+  return;
+ }
+ NSMutableArray *shape=[NSMutableArray array];for(NSData *a in sets)[shape addObject:@(a.length<=31)];_shape=shape;
  // Start the sets over: stop them all and clear them (0x2039 with no sets disables all; 0x203D clears)
  if(_advertising){[self command:0x2039 params:[NSData dataWithBytes:(uint8_t[]){0,0} length:2]];_advertising=NO;}
  [self command:0x203d params:nil];
@@ -744,22 +758,40 @@ static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
  for(CBUUID *u in sharing)if([ad[CBAdvertisementDataServiceUUIDsKey] containsObject:u]||ad[CBAdvertisementDataServiceDataKey][u])return phones;
  return [ad[CBAdvertisementDataLocalNameKey] length]||p.name.length||[ad[CBAdvertisementDataServiceUUIDsKey] count]||[ad[CBAdvertisementDataServiceDataKey] count]||m.length>=2;
 }
+// What a twin stands for. Normally the CoreBluetooth identity; but a phone's Nearby beacon
+// (Quick Share) comes from a new address every few minutes while its endpoint id, in the
+// beacon itself, stays: keyed by that, the twin keeps one address and Android, which connects
+// to the address it last saw, finds it there, and the twin connects to the phone's latest identity.
+static NSString *twinKey(NSDictionary *ad, CBPeripheral *p) {
+ NSData *d=ad[CBAdvertisementDataServiceDataKey][[CBUUID UUIDWithString:@"FEF3"]];
+ const uint8_t *b=d.bytes;
+ if(d.length>=5&&(b[0]&0xe0)==0x20)   // fast advertisement: version byte, then the 4-byte endpoint id
+  return [NSString stringWithFormat:@"nearby:%02x%02x%02x%02x",b[1],b[2],b[3],b[4]];
+ return p.identifier.UUIDString;
+}
+- (GBMirror *)mirrorFor:(CBPeripheral *)p {
+ for(GBMirror *m in self.mirrors.allValues)if(m.peripheral==p)return m;
+ return nil;
+}
 - (void)centralManager:(CBCentralManager *)c didDiscoverPeripheral:(CBPeripheral *)p advertisementData:(NSDictionary *)ad RSSI:(NSNumber *)rssi {
  [self tallyNearby:ad peripheral:p rssi:rssi];
- GBMirror *m=self.mirrors[p.identifier];
+ NSString *key=twinKey(ad,p);
+ GBMirror *m=self.mirrors[key];
+ // The same phone under a new identity: the twin follows it (unless Android is connected)
+ if(m&&m.peripheral!=p&&!m.connected){m.peripheral=p;m.advertisement=ad;}
  if(!m){
   if(!worthRelaying(ad,p,self.phones))return;
   // Full: the twin heard from least recently goes (phones change identity every few minutes,
   // so a new one would otherwise wait until old twins time out)
   if(self.mirrors.count>=(self.phones?kMaxMirrorsWithPhones:kMaxMirrors)){
-   NSUUID *oldest=nil;NSTimeInterval t=CFAbsoluteTimeGetCurrent();
-   for(NSUUID *k in self.mirrors){GBMirror *o=self.mirrors[k];if(!o.connected&&o.lastSeen<t){t=o.lastSeen;oldest=k;}}
+   NSString *oldest=nil;NSTimeInterval t=CFAbsoluteTimeGetCurrent();
+   for(NSString *k in self.mirrors){GBMirror *o=self.mirrors[k];if(!o.connected&&o.lastSeen<t){t=o.lastSeen;oldest=k;}}
    if(!oldest||CFAbsoluteTimeGetCurrent()-t<5)return;   // all in use or just heard
    [self.mirrors[oldest] close];[self.mirrors removeObjectForKey:oldest];
   }
-  m=[GBMirror new];m.peripheral=p;m.advertisement=ad;m.relay=self;
+  m=[GBMirror new];m.peripheral=p;m.key=key;m.advertisement=ad;m.relay=self;
   if(![m openOnPort:self.port queue:self.queue]){GBLog(@"the VM's Bluetooth controller isn't reachable");return;}
-  self.mirrors[p.identifier]=m;
+  self.mirrors[key]=m;
   // What kind of device, for tuning worthRelaying (no names or addresses)
   NSData *mfr=ad[CBAdvertisementDataManufacturerDataKey];
   GBLog(@"relaying a device: company %@, services %@, service data %@, connectable %@",
@@ -780,7 +812,7 @@ static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
   NSData *d=ad[CBAdvertisementDataServiceDataKey][u];
   if(!d&&![ad[CBAdvertisementDataServiceUUIDsKey] containsObject:u])continue;
   NSString *k=[NSString stringWithFormat:@"%@ %lu bytes%@ %@",u.UUIDString,(unsigned long)d.length,[ad[CBAdvertisementDataIsConnectable] boolValue]?@" connectable":@"",
-               self.mirrors[p.identifier]?@"relayed":@"NOT relayed"];
+               [self mirrorFor:p]||self.mirrors[twinKey(ad,p)]?@"relayed":@"NOT relayed"];
   if(!self.tally)self.tally=[NSMutableDictionary dictionary];
   NSMutableSet *ids=self.tally[k]?:[NSMutableSet set];[ids addObject:p.identifier];self.tally[k]=ids;
  }
@@ -789,7 +821,7 @@ static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
  for(NSString *k in self.tally)GBLog(@"heard: %@ from %lu devices",k,(unsigned long)[self.tally[k] count]);
  [self.tally removeAllObjects];
  NSTimeInterval now=CFAbsoluteTimeGetCurrent();
- for(NSUUID *k in self.mirrors.allKeys){GBMirror *m=self.mirrors[k];if(m.connected||now-m.lastSeen<kForgetAfter)continue;[m close];[self.mirrors removeObjectForKey:k];}
+ for(NSString *k in self.mirrors.allKeys){GBMirror *m=self.mirrors[k];if(m.connected||now-m.lastSeen<kForgetAfter)continue;[m close];[self.mirrors removeObjectForKey:k];}
 }
 - (void)connectMac:(GBMirror *)m {
  GBLog(@"Android connected to a device");
@@ -798,9 +830,9 @@ static BOOL worthRelaying(NSDictionary *ad, CBPeripheral *p, BOOL phones) {
 - (void)disconnectMac:(GBMirror *)m {
  if(m.peripheral.state!=CBPeripheralStateDisconnected)[self.central cancelPeripheralConnection:m.peripheral];
 }
-- (void)centralManager:(CBCentralManager *)c didConnectPeripheral:(CBPeripheral *)p {[self.mirrors[p.identifier] macConnected];}
+- (void)centralManager:(CBCentralManager *)c didConnectPeripheral:(CBPeripheral *)p {[[self mirrorFor:p] macConnected];}
 - (void)centralManager:(CBCentralManager *)c didFailToConnectPeripheral:(CBPeripheral *)p error:(NSError *)e {
- GBLog(@"the Mac couldn't connect to the real device: %@ %ld",e.domain,(long)e.code);[self.mirrors[p.identifier] macDisconnected:e];}
+ GBLog(@"the Mac couldn't connect to the real device: %@ %ld",e.domain,(long)e.code);[[self mirrorFor:p] macDisconnected:e];}
 - (void)centralManager:(CBCentralManager *)c didDisconnectPeripheral:(CBPeripheral *)p error:(NSError *)e {
- GBLog(@"the real device disconnected from the Mac: %@ %ld",e.domain?:@"-",(long)e.code);[self.mirrors[p.identifier] macDisconnected:e];}
+ GBLog(@"the real device disconnected from the Mac: %@ %ld",e.domain?:@"-",(long)e.code);[[self mirrorFor:p] macDisconnected:e];}
 @end
