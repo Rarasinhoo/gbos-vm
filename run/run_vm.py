@@ -35,13 +35,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import vm_control
 
-# Kernel command line for the pinned image (mica-user 16471258). The vbmeta values describe the
+# Kernel command line for the pinned image (mica-user 16693588). The vbmeta values describe the
 # original, unmodified vbmeta partition of that image.
 CMDLINE = ('console=ttyAMA0,115200 earlycon=pl011,0x9000000 panic=0 root=/dev/ram0 '
            'androidboot.hardware=android-desktop androidboot.hardware.platform=android-desktop '
            'androidboot.slot_suffix=_a androidboot.boot_devices=3f000000.pcie androidboot.vbmeta.size=7680 '
            'androidboot.vbmeta.hash_alg=sha256 '
-           'androidboot.vbmeta.digest=9118d58c024a0b43fef17a1dcdf6b999b5ea9cbc053fd4377d5d78c445b15692 '
+           'androidboot.vbmeta.digest=6b2cafda16e0f1fce7977647eb427696e36492692c29cc88250d1ae13f4d56aa '
            'androidboot.vbmeta.device_state=unlocked androidboot.verifiedbootstate=orange '
            'androidboot.veritymode=enforcing printk.devkmsg=on '
            # "false", not "0": the same to everything that reads it, but it doesn't match the
