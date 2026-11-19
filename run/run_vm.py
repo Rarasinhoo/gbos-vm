@@ -208,7 +208,14 @@ def main():
     a.add_argument('--host-refresh', type=float, help="the Mac screen's refresh rate; picks the guest rate that paces best on it")
     a.add_argument('--refresh', type=float, help='guest refresh rate in Hz (overrides --host-refresh; default 75)')
     a.add_argument('--image', help='image folder (default WORK/image)')
+    a.add_argument('--usb-host', action='append', default=[], metavar='VID:PID',
+                   help="pass a Mac USB device straight to the guest (hex ids, e.g. 0bda:b851); repeatable")
     args = a.parse_args()
+    usb_hosts = []
+    for spec in args.usb_host:
+        m = re.fullmatch(r'([0-9a-fA-F]{4}):([0-9a-fA-F]{4})', spec)
+        if not m: a.error(f'--usb-host {spec!r}: expected VID:PID in hex, e.g. 0bda:b851')
+        usb_hosts.append((m[1].lower(), m[2].lower()))
     work = Path(args.work).resolve()
     if not args.name.replace('-', '').replace('_', '').isalnum(): a.error('RUN_NAME: letters, digits, - and _ only')
     if args.seconds is not None and not 10 <= args.seconds <= 86400: a.error('--seconds: 10 to 86400')
@@ -300,6 +307,8 @@ def main():
     if args.microphone:
         cmd += ['-chardev', 'socket,id=mic,path=mic.sock,server=on,wait=off',
                 '-device', 'usb-redir,chardev=mic,id=mic,bus=xhci.0']
+    for i, (vid, pid) in enumerate(usb_hosts):
+        cmd += ['-device', f'usb-host,id=usbhost{i},vendorid=0x{vid},productid=0x{pid},bus=xhci.0']
     # The launcher loads only builds from its own folder, chosen by file name
     env = dict(os.environ, VM_QEMU_LIBRARY=qemu.name,
                DYLD_FRAMEWORK_PATH=str(utm / 'Contents/Frameworks'),
